@@ -147,23 +147,29 @@ st.markdown(
 
 # ---- Ticker search ("la lupa") ----
 # st.selectbox is type-searchable out of the box: typing "App" filters to
-# AAPL · Apple Inc. The custom-ticker toggle below lets a user enter
-# anything outside the curated S&P 500 universe.
+# AAPL · Apple Inc. The custom-ticker toggle reveals a free-text input
+# for anything outside the curated S&P 500 universe.
 _LABELS: list[str] = ticker_labels(SP500_TOP)
 
-ic1, ic2, ic3, ic4 = st.columns([1.5, 2.4, 1.0, 1.1])
+# Tiny uppercase labels above each control for orientation
+lab1, lab2, lab3, lab4 = st.columns([0.9, 4.0, 2.0, 1.1])
+with lab1: st.markdown('<div class="eq-section-label">MODE</div>', unsafe_allow_html=True)
+with lab2: st.markdown('<div class="eq-section-label">TICKER</div>', unsafe_allow_html=True)
+with lab3: st.markdown('<div class="eq-section-label">PEERS</div>', unsafe_allow_html=True)
+with lab4: st.markdown('<div class="eq-section-label">&nbsp;</div>', unsafe_allow_html=True)
+
+ic1, ic2, ic3, ic4 = st.columns([0.9, 4.0, 2.0, 1.1])
 with ic1:
     use_custom = st.toggle(
         "Custom",
         value=False,
-        help="Toggle to type a ticker outside the curated list "
-             "(e.g. an international ADR or small-cap).",
+        help="Toggle on to type any ticker outside the curated S&P 500 list.",
     )
 with ic2:
     if use_custom:
         ticker = st.text_input(
             "Ticker", value="AAPL", label_visibility="collapsed",
-            placeholder="TYPE A TICKER",
+            placeholder="Type a ticker (e.g. AAPL)",
         ).strip().upper()
     else:
         default_idx = next(
@@ -176,16 +182,19 @@ with ic2:
             options=_LABELS,
             index=default_idx,
             label_visibility="collapsed",
-            placeholder="🔎 Search ticker or company…",
+            placeholder="🔎  Search ticker or company…",
         )
         ticker = ticker_from_label(chosen_label)
 with ic3:
     peers = st.text_input(
-        "Peers", value="MSFT,GOOGL,META", label_visibility="collapsed",
-        placeholder="PEERS",
+        "Peers", value="MSFT,GOOGL,META",
+        label_visibility="collapsed",
+        placeholder="Comma-separated",
     )
 with ic4:
-    analyze = st.button("Analyze", use_container_width=True)
+    analyze = st.button(
+        "Analyze", type="primary", use_container_width=True,
+    )
 
 
 # ============================================================

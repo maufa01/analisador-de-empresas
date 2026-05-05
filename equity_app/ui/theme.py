@@ -154,8 +154,7 @@ h1, h2, h3, h4, h5 {{
 
 /* ---------- Inputs ---------- */
 .stTextInput input,
-.stNumberInput input,
-.stSelectbox div[data-baseweb="select"] > div {{
+.stNumberInput input {{
     background-color: var(--surface) !important;
     color: var(--text-primary) !important;
     border: 1px solid var(--border) !important;
@@ -174,6 +173,34 @@ h1, h2, h3, h4, h5 {{
     background-color: var(--surface) !important;
     color: var(--text-secondary) !important;
     border: 1px solid var(--border) !important;
+}}
+
+/* Selectbox — BaseWeb nests several divs; we override the outer wrapper
+   and let the inner value/input keep BaseWeb's vertical centering. */
+.stSelectbox div[data-baseweb="select"] > div {{
+    background-color: var(--surface) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
+    min-height: 40px !important;
+    font-family: {FONT_STACK};
+}}
+.stSelectbox div[data-baseweb="select"] [data-baseweb="select-value"],
+.stSelectbox div[data-baseweb="select"] input,
+.stSelectbox div[data-baseweb="select"] span {{
+    color: var(--text-primary) !important;
+    font-size: 13px !important;
+    line-height: 1.4 !important;
+}}
+.stSelectbox div[data-baseweb="select"]:focus-within > div {{
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 1px var(--accent) !important;
+}}
+
+/* Toggle (st.toggle) — match the input height so the row is visually aligned */
+.stToggle > label {{
+    min-height: 40px;
+    display: flex !important;
+    align-items: center;
 }}
 
 /* Sidebar inputs (when expanded) */

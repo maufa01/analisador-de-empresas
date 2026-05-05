@@ -58,7 +58,9 @@ with ic3:
         label_visibility="collapsed",
     )
 with ic4:
-    optimize_btn = st.button("Optimize", use_container_width=True)
+    optimize_btn = st.button(
+        "Optimize", type="primary", use_container_width=True,
+    )
 
 
 # ============================================================
