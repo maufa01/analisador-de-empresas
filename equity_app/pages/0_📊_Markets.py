@@ -30,7 +30,6 @@ from data.market_data import (
     INDEX_META,
     get_indices, get_index_history,
     get_movers, get_movers_by_sector,
-    get_sector_performance,
     get_sparkline_panel,
 )
 from ui.charts.sp500_chart import build_sp500_figure
@@ -42,7 +41,6 @@ from ui.components.movers_table import render_movers, render_movers_grouped
 from ui.components.period_selector import render_period_selector, to_yf_period
 from ui.components.header_metric import render_header_metric
 from ui.components.premarket_futures import render_premarket_futures
-from ui.components.sector_heatmap import render_sector_heatmap
 from ui.components.yields_strip import render_yields_strip
 
 
@@ -175,19 +173,7 @@ render_market_breadth()
 
 
 # ============================================================
-# 7 — Sector performance heatmap (restored)
-# ============================================================
-st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-st.markdown(
-    '<div class="eq-section-label">SECTOR PERFORMANCE</div>',
-    unsafe_allow_html=True,
-)
-sectors_df = get_sector_performance()
-render_sector_heatmap(sectors_df, height=240)
-
-
-# ============================================================
-# 8 — Top movers
+# 7 — Top movers
 # ============================================================
 st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
 
