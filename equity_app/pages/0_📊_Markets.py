@@ -144,14 +144,7 @@ st.markdown(
 )
 
 sectors_df = get_sector_performance()
-
-
-def _select_sector(sec: str) -> None:
-    st.session_state["movers_sector"] = sec
-    st.session_state["movers_universe"] = "S&P 500"
-
-
-render_sector_heatmap(sectors_df, on_select=_select_sector, height=240)
+render_sector_heatmap(sectors_df, height=240)
 
 
 # ============================================================

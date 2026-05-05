@@ -84,15 +84,23 @@ def build_sector_heatmap_figure(
         ),
         hovertemplate=(
             "<b>%{label}</b><br>"
-            "Change %{customdata[0]:+.2f}%<br>"
-            "ETF %{customdata[1]} · $%{customdata[2]:,.2f}"
+            "Change %{customdata[0]}<br>"
+            "ETF %{customdata[1]} · %{customdata[2]}"
             "<extra></extra>"
         ),
-        customdata=np.stack([
-            df["change_pct"].values,
-            df["etf"].values,
-            df["last"].values,
-        ], axis=-1),
+        # Pre-format every customdata value as a string. ``np.stack`` on a
+        # mix of float + string columns coerces everything to object dtype,
+        # which Plotly's "%{customdata[i]:+.2f}" format specifier silently
+        # ignores — that's how the tooltip ended up showing
+        # "0.917588665299296%" with 15 decimals instead of "+0.92%".
+        customdata=[
+            [f"{cp:+.2f}%", etf, f"${last:,.2f}"]
+            for cp, etf, last in zip(
+                df["change_pct"].values,
+                df["etf"].values,
+                df["last"].values,
+            )
+        ],
     ))
 
     fig.update_layout(
@@ -107,32 +115,16 @@ def build_sector_heatmap_figure(
 def render_sector_heatmap(
     sectors: pd.DataFrame,
     *,
-    on_select=None,
     height: int = 240,
+    on_select=None,                          # kept for backwards compat; unused
 ) -> None:
     """
-    Render the heatmap + a row of "click to filter" links underneath.
-
-    Plotly Treemap clicks aren't reliably surfaced in Streamlit yet, so
-    we expose a parallel row of small buttons (one per sector) that the
-    page wires to the movers-table sector filter.
+    Render the heatmap. The "click a button to filter movers" row that
+    used to live below was removed — labels were getting truncated and
+    the duplicate "Consumer" pills (Discretionary vs Staples both
+    starting with the same word) made the grid confusing. The sector
+    pills under TOP MOVERS already cover that filter.
     """
     fig = build_sector_heatmap_figure(sectors, height=height)
     st.plotly_chart(fig, use_container_width=True,
                     config={"displayModeBar": False})
-
-    if on_select is None or sectors is None or sectors.empty:
-        return
-
-    df = sectors.dropna(subset=["change_pct"])
-    cols = st.columns(len(df))
-    for col, (_, r) in zip(cols, df.iterrows()):
-        with col:
-            label = r["sector"].split(" ")[0]            # short label fits the col
-            if st.button(
-                label, key=f"sector_pick_{r['sector']}",
-                type="secondary", use_container_width=True,
-                help=f"Filter movers to {r['sector']}",
-            ):
-                on_select(r["sector"])
-                st.rerun()
