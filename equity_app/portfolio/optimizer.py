@@ -26,9 +26,14 @@ from scipy.optimize import minimize
 from core.constants import PORTFOLIO_DEFAULTS
 from .constraints import build_constraints
 from .shrinkage import ledoit_wolf
+from .hrp import hrp_weights
+from .black_litterman import black_litterman_returns, View
 
 
-Objective = Literal["max_sharpe", "min_vol", "risk_parity", "equal_weight"]
+Objective = Literal[
+    "max_sharpe", "min_vol", "risk_parity", "equal_weight",
+    "hrp", "black_litterman",
+]
 TRADING_DAYS = PORTFOLIO_DEFAULTS["trading_days"]
 
 
@@ -306,6 +311,92 @@ def efficient_frontier(
 
 
 # ============================================================
+# HRP (Hierarchical Risk Parity)
+# ============================================================
+def hrp(
+    returns: pd.DataFrame,
+    *,
+    cov: Optional[pd.DataFrame] = None,
+    risk_free: float = PORTFOLIO_DEFAULTS["risk_free_rate"],
+    trading_days: int = TRADING_DAYS,
+) -> OptimizationResult:
+    """
+    Allocate via López de Prado's HRP. Long-only by construction.
+
+    Constraints (max_position / sector caps) aren't applied — HRP's
+    defining property is robustness through the cluster ordering, not
+    bound respect. Use max_sharpe with sector caps if you need those.
+    """
+    mu = _expected_returns(returns, trading_days=trading_days)
+    sigma = _ensure_cov(returns, cov, trading_days)
+    tickers = list(returns.columns)
+
+    w_series = hrp_weights(returns)
+    w = w_series.reindex(tickers).fillna(0.0).values
+
+    ret, vol, sh = _portfolio_stats(w, mu.values, sigma.values, risk_free)
+    return OptimizationResult(
+        weights=pd.Series(w, index=tickers, name="weight"),
+        expected_return=ret, volatility=vol, sharpe=sh,
+        objective="hrp",
+        n_iterations=0, converged=True,
+    )
+
+
+# ============================================================
+# Black-Litterman → Max Sharpe
+# ============================================================
+def black_litterman(
+    returns: pd.DataFrame,
+    *,
+    market_weights: pd.Series,
+    views: Optional[list[View]] = None,
+    cov: Optional[pd.DataFrame] = None,
+    risk_aversion: float = 2.5,
+    tau: float = 0.05,
+    risk_free: float = PORTFOLIO_DEFAULTS["risk_free_rate"],
+    trading_days: int = TRADING_DAYS,
+    max_position: float = PORTFOLIO_DEFAULTS["max_position_size"],
+    min_position: float = 0.0,
+) -> OptimizationResult:
+    """
+    Mean-variance with Black-Litterman posterior expected returns.
+
+    With ``views=None`` reduces to max-Sharpe over the equilibrium
+    implied returns ``Π``. Pass ``View(asset_long=…, magnitude=…)``
+    for absolute / relative tilts.
+    """
+    sigma = _ensure_cov(returns, cov, trading_days)
+    tickers = list(returns.columns)
+
+    bl_mu = black_litterman_returns(
+        cov=sigma, market_weights=market_weights, views=views,
+        risk_aversion=risk_aversion, tau=tau,
+    ).reindex(tickers)
+
+    bounds, cons = build_constraints(
+        tickers=tickers, max_position=max_position, min_position=min_position,
+    )
+    mu_arr, cov_arr = bl_mu.values, sigma.values
+
+    def neg_sharpe(w):
+        ret, vol, _ = _portfolio_stats(w, mu_arr, cov_arr, risk_free)
+        return -((ret - risk_free) / vol) if vol > 0 else 1e6
+
+    w, res = _solve(objective_fn=neg_sharpe, n=len(tickers),
+                    bounds=bounds, cons=cons)
+    ret, vol, sh = _portfolio_stats(w, mu_arr, cov_arr, risk_free)
+    return OptimizationResult(
+        weights=pd.Series(w, index=tickers, name="weight"),
+        expected_return=ret, volatility=vol, sharpe=sh,
+        objective="black_litterman",
+        n_iterations=int(res.nit),
+        converged=bool(res.success),
+        message=str(res.message),
+    )
+
+
+# ============================================================
 # Dispatcher
 # ============================================================
 def optimize(
@@ -314,15 +405,21 @@ def optimize(
     **kwargs,
 ) -> OptimizationResult:
     fn = {
-        "max_sharpe":   max_sharpe,
-        "min_vol":      min_vol,
-        "risk_parity":  risk_parity,
-        "equal_weight": equal_weight,
+        "max_sharpe":      max_sharpe,
+        "min_vol":         min_vol,
+        "risk_parity":     risk_parity,
+        "equal_weight":    equal_weight,
+        "hrp":             hrp,
+        "black_litterman": black_litterman,
     }.get(objective)
     if fn is None:
         raise ValueError(f"Unknown objective: {objective}")
     if objective == "equal_weight":
         # equal_weight has a narrower kwarg surface
+        keep = {k: v for k, v in kwargs.items()
+                if k in {"cov", "risk_free", "trading_days"}}
+        return fn(returns, **keep)
+    if objective == "hrp":
         keep = {k: v for k, v in kwargs.items()
                 if k in {"cov", "risk_free", "trading_days"}}
         return fn(returns, **keep)
