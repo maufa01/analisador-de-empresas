@@ -147,6 +147,59 @@ def get_spx_history(period: str = "1y") -> pd.DataFrame:
 
 
 # ============================================================
+# Multi-ticker price panel — used by the Portfolio page
+# ============================================================
+@st.cache_data(ttl=600, show_spinner=False)
+def get_price_panel(
+    tickers: tuple[str, ...] | list[str],
+    *,
+    period: str = "5y",
+    interval: str = "1d",
+) -> pd.DataFrame:
+    """
+    Adjusted-close panel: rows = dates, columns = tickers.
+
+    Tickers that yfinance cannot resolve are silently dropped; the caller
+    sees an empty DataFrame only if EVERY ticker fails. ``tickers`` is
+    accepted as a tuple to keep the cache key hashable.
+    """
+    yf = _yfinance()
+    tickers = list(tickers)
+    if yf is None or not tickers:
+        return pd.DataFrame()
+
+    try:
+        df = yf.download(
+            tickers,
+            period=period,
+            interval=interval,
+            auto_adjust=True,            # we want adjusted close
+            progress=False,
+            group_by="ticker",
+            threads=False,
+        )
+    except Exception as e:
+        log.warning("yf_panel_download_failed",
+                    tickers=tickers, period=period, error=str(e))
+        return pd.DataFrame()
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        out = pd.DataFrame()
+        for t in tickers:
+            try:
+                out[t] = df[(t, "Close")]
+            except (KeyError, ValueError):
+                continue
+    else:
+        out = df["Close"].to_frame(tickers[0]) if "Close" in df.columns else df
+
+    return out.dropna(how="all").sort_index()
+
+
+# ============================================================
 # Top movers
 # ============================================================
 def _annualized_vol(close: pd.Series) -> float:
