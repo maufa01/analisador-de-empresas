@@ -1,0 +1,120 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "equity-app"
+version = "0.1.0"
+description = "Institutional-grade equity research, valuation, and portfolio optimization on Streamlit."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "maufa01" }]
+
+# Runtime dependencies — keep in sync with requirements.txt.
+# (requirements.txt is authoritative for `pip install -r`.)
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+include = [
+    "core*", "data*", "analysis*", "valuation*", "scoring*",
+    "portfolio*", "ui*", "exports*",
+]
+
+# ============================================================
+# pytest
+# ============================================================
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = [
+    "-q",
+    "--strict-markers",
+    "--strict-config",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pkg_resources.*",
+    "ignore::DeprecationWarning:pandas.*",
+]
+markers = [
+    "integration: tests that hit live data sources (skipped in CI)",
+    "slow: long-running tests",
+]
+
+# ============================================================
+# coverage
+# ============================================================
+[tool.coverage.run]
+source = ["analysis", "valuation", "portfolio", "data", "core", "scoring"]
+omit = ["*/tests/*", "scripts/_scaffold.py"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+# ============================================================
+# ruff
+# ============================================================
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["scripts/_scaffold.py", ".cache", ".data"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # simplify
+    "N",   # pep8-naming
+]
+ignore = [
+    "E501",  # line length handled by formatter
+    "B008",  # FastAPI-style defaults — not used, harmless
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["N802", "N803"]    # allow PascalCase test classes/methods
+
+# ============================================================
+# black
+# ============================================================
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+extend-exclude = '''
+/(
+    \.cache
+  | \.data
+  | scripts/_scaffold\.py
+)/
+'''
+
+# ============================================================
+# mypy
+# ============================================================
+[tool.mypy]
+python_version = "3.11"
+strict_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+no_implicit_optional = true
+ignore_missing_imports = true
+disallow_untyped_defs = false
+exclude = [
+    "scripts/_scaffold\\.py",
+    "tests",
+]
