@@ -591,10 +591,36 @@ with tab_overview:
     news_res = analyze_ticker_news(active_ticker, limit=30, engine=engine)
     render_news_sentiment_panel(news_res)
 
+    # ---- AI thesis prompt generator (offline mode) ----
+    from analysis.shareholder_yield import calculate_shareholder_yield as _sy_for_prompt
+    from analysis.ai_thesis_prompt import build_thesis_prompt
+    from ui.components.ai_thesis_panel import render_ai_thesis_panel
+
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    if st.toggle("AI investment thesis (offline copy-paste)",
+                 value=False, key=f"ai_thesis_toggle_{active_ticker}"):
+        _sy_for_thesis = _sy_for_prompt(
+            cash=cf, market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+        )
+        thesis_prompt = build_thesis_prompt(
+            ticker=active_ticker,
+            company_name=company_name,
+            sector=sector_label,
+            industry=TICKER_META.get(active_ticker, {}).get("industry"),
+            market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+            current_price=current_price,
+            valuation_results=results,
+            earnings_quality=eq,
+            dividend_safety=div_res,
+            shareholder_yield=_sy_for_thesis,
+            news_sentiment=news_res,
+        )
+        render_ai_thesis_panel(thesis_prompt, ticker=active_ticker)
+
     st.caption(
         "Pending live-data wiring: segments / geography, analyst ratings, "
-        "news + sentiment, short interest, events timeline. They land when "
-        "the FMP / EDGAR / news endpoints come online."
+        "short interest, events timeline. They land when the FMP / EDGAR "
+        "endpoints come online."
     )
 
 
@@ -1067,6 +1093,16 @@ with tab_capital:
     )
     ccc_result = analyze_ccc(income=inc, balance=bal, sector=sector)
     render_ccc_dashboard(ccc_result)
+
+    # ---- Shareholder yield ----
+    from analysis.shareholder_yield import calculate_shareholder_yield
+    from ui.components.shareholder_yield_card import render_shareholder_yield_card
+
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    sy_result = calculate_shareholder_yield(
+        cash=cf, market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+    )
+    render_shareholder_yield_card(sy_result)
 
 
 # ---- Insiders (placeholder until FMP is wired) ----
