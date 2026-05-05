@@ -289,6 +289,19 @@ if (results.aggregator and np.isfinite(results.aggregator.intrinsic_per_share)
         and current_price and current_price > 0):
     upside = (results.aggregator.intrinsic_per_share - current_price) / current_price
 
+# Persist score/rating into watchlist meta so the alert checker can detect
+# score changes the next time it runs.
+if is_in_watchlist(active_ticker):
+    try:
+        from data.watchlist_alerts_db import update_last_check
+        update_last_check(
+            active_ticker,
+            score=int(round(results.score.composite)) if results.score else None,
+            rating=(results.rating.verdict if results.rating else None),
+        )
+    except Exception:
+        pass
+
 
 # ============================================================
 # 2 — Big ticker header (price + intrinsic + rating)
@@ -562,6 +575,21 @@ with tab_overview:
     st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
     div_res = analyze_dividend_safety(income=inc, balance=bal, cash=cf)
     render_dividend_safety_card(div_res)
+
+    # ---- News sentiment (yfinance + VADER, opt-in FinBERT) ----
+    from analysis.news_sentiment import analyze_ticker_news
+    from ui.components.news_sentiment_panel import render_news_sentiment_panel
+
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    engine_label = st.radio(
+        "sentiment_engine",
+        options=["VADER (fast)", "FinBERT (heavy, finance-tuned)"],
+        index=0, horizontal=True, label_visibility="collapsed",
+        key=f"sent_engine_{active_ticker}",
+    )
+    engine = "finbert" if engine_label.startswith("FinBERT") else "vader"
+    news_res = analyze_ticker_news(active_ticker, limit=30, engine=engine)
+    render_news_sentiment_panel(news_res)
 
     st.caption(
         "Pending live-data wiring: segments / geography, analyst ratings, "
@@ -963,6 +991,14 @@ with tab_quality:
         income=inc, sector=sector_label, industry=industry_label,
     )
     render_revenue_quality_card(rev_q)
+
+    # ---- Earnings volatility (compounder vs cyclical) ----
+    from analysis.earnings_volatility import analyze_earnings_volatility
+    from ui.components.earnings_volatility_card import render_earnings_volatility_card
+
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    ev = analyze_earnings_volatility(income=inc)
+    render_earnings_volatility_card(ev)
 
 
 # ---- Peers ----
