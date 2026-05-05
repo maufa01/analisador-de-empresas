@@ -555,6 +555,14 @@ with tab_overview:
     snap = get_holdings_snapshot(active_ticker)
     render_institutional_holders_card(snap, target_ticker=active_ticker)
 
+    # ---- Dividend safety ----
+    from analysis.dividend_safety import analyze_dividend_safety
+    from ui.components.dividend_safety_card import render_dividend_safety_card
+
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    div_res = analyze_dividend_safety(income=inc, balance=bal, cash=cf)
+    render_dividend_safety_card(div_res)
+
     st.caption(
         "Pending live-data wiring: segments / geography, analyst ratings, "
         "news + sentiment, short interest, events timeline. They land when "
@@ -786,6 +794,35 @@ with tab_valuation:
     eh = get_earnings_history(active_ticker)
     render_earnings_track_record(eh)
 
+    # ---- Stress testing (rates / USD / recession / sector) ----
+    from analysis.stress_testing import (
+        stress_test_rates, stress_test_usd,
+        stress_test_recession, stress_test_sector,
+    )
+    from ui.components.stress_test_panel import render_stress_test_panel
+
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    rates_res = stress_test_rates(
+        income=inc, balance=bal, cash=cf,
+        assumptions=current_assumptions, current_price=current_price,
+    )
+    usd_res = stress_test_usd(
+        income=inc, balance=bal, cash=cf,
+        assumptions=current_assumptions, sector=sector_label,
+    )
+    recession_res = stress_test_recession(
+        income=inc, balance=bal, cash=cf,
+        assumptions=current_assumptions,
+    )
+    sector_res = stress_test_sector(
+        income=inc, balance=bal, cash=cf,
+        assumptions=current_assumptions, sector=sector_label,
+    )
+    render_stress_test_panel(
+        rates=rates_res, usd=usd_res,
+        recession=recession_res, sector=sector_res,
+    )
+
 
 # ---- Financials ----
 with tab_financials:
@@ -907,6 +944,25 @@ with tab_quality:
         render_red_flags_comparison(active_ticker, eq)
     else:
         st.info("Earnings-quality models could not be computed for this fixture.")
+
+    # ---- Balance-sheet forensics ----
+    from analysis.balance_sheet_quality import analyze_balance_sheet_quality
+    from ui.components.balance_sheet_forensics_card import render_balance_sheet_forensics
+
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    bs_res = analyze_balance_sheet_quality(income=inc, balance=bal)
+    render_balance_sheet_forensics(bs_res)
+
+    # ---- Revenue quality ----
+    from analysis.revenue_quality import analyze_revenue_quality
+    from ui.components.revenue_quality_card import render_revenue_quality_card
+
+    industry_label = TICKER_META.get(active_ticker, {}).get("industry")
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    rev_q = analyze_revenue_quality(
+        income=inc, sector=sector_label, industry=industry_label,
+    )
+    render_revenue_quality_card(rev_q)
 
 
 # ---- Peers ----
