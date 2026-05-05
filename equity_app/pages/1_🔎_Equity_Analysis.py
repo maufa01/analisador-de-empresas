@@ -45,6 +45,12 @@ from valuation.dcf_three_stage import sensitivity_table
 from ui.charts.margins_evolution import build_margins_figure
 from ui.charts.revenue_history import build_revenue_figure
 from ui.components.assumptions_panel import render_assumptions_panel
+from ui.components.financial_chart import (
+    build_income_chart, build_balance_chart, build_fcf_chart,
+)
+from ui.components.financial_table import (
+    render_income_statement, render_balance_sheet, render_cash_flow,
+)
 from ui.components.monte_carlo_chart import build_mc_distribution_figure
 from ui.components.quick_metrics import render_quick_metrics
 from ui.components.score_breakdown import render_score_breakdown
@@ -502,28 +508,78 @@ with tab_valuation:
 
 # ---- Financials ----
 with tab_financials:
-    st.markdown(
-        '<div class="eq-section-label">INCOME STATEMENT</div>',
-        unsafe_allow_html=True,
-    )
-    st.dataframe(inc.T, use_container_width=True, height=320)
+    # ---- Top bar: view-mode toggle + Excel download on the right ----
+    fin_l, fin_r1, fin_r2 = st.columns([4, 1.4, 1.4])
+    with fin_l:
+        view_mode_label = st.radio(
+            "view_mode_pill",
+            options=["Absolute", "Common size", "Growth"],
+            index=0, horizontal=True, label_visibility="collapsed",
+            key=f"fin_view_{active_ticker}",
+        )
+    view_mode = {
+        "Absolute":     "absolute",
+        "Common size":  "common_size",
+        "Growth":       "growth",
+    }[view_mode_label]
 
+    with fin_r2:
+        try:
+            from exports.excel_export import export_financials_xlsx
+            xlsx_bytes = export_financials_xlsx(
+                income=inc, balance=bal, cash=cf, ticker=active_ticker,
+            )
+            st.download_button(
+                "Download Excel",
+                data=xlsx_bytes,
+                file_name=f"{active_ticker}_financials.xlsx",
+                mime=("application/vnd.openxmlformats-officedocument."
+                      "spreadsheetml.sheet"),
+                use_container_width=True,
+                key=f"xlsx_{active_ticker}",
+            )
+        except ImportError:
+            st.caption("openpyxl not installed — Excel export unavailable.")
+
+    # ---- Income Statement ----
     st.markdown(
         '<div class="eq-section-label" style="margin-top:14px;">'
+        'INCOME STATEMENT</div>',
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(
+        build_income_chart(inc, height=200),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+    render_income_statement(inc, view=view_mode)
+
+    # ---- Balance Sheet ----
+    st.markdown(
+        '<div class="eq-section-label" style="margin-top:18px;">'
         'BALANCE SHEET</div>',
         unsafe_allow_html=True,
     )
-    st.dataframe(bal.T, use_container_width=True, height=320)
+    st.plotly_chart(
+        build_balance_chart(bal, height=200),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+    render_balance_sheet(bal, view=view_mode)
 
+    # ---- Cash Flow ----
     st.markdown(
-        '<div class="eq-section-label" style="margin-top:14px;">'
+        '<div class="eq-section-label" style="margin-top:18px;">'
         'CASH FLOW STATEMENT</div>',
         unsafe_allow_html=True,
     )
-    st.dataframe(cf.T, use_container_width=True, height=320)
+    st.plotly_chart(
+        build_fcf_chart(cf, income=inc, height=200),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+    render_cash_flow(cf, view=view_mode)
 
+    # ---- Financial Ratios (kept as st.dataframe — already legible) ----
     st.markdown(
-        '<div class="eq-section-label" style="margin-top:14px;">'
+        '<div class="eq-section-label" style="margin-top:18px;">'
         'FINANCIAL RATIOS</div>',
         unsafe_allow_html=True,
     )
