@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -28,8 +29,16 @@ from valuation.comparables import (
     PeerSnapshot, TargetFundamentals,
     value_by_comparables, comparables_table,
 )
+from valuation.monte_carlo import run_monte_carlo
+from valuation.ddm import two_stage as ddm_two_stage, is_applicable as ddm_is_applicable
+from valuation.residual_income import run_residual_income
+from valuation.valuation_aggregator import aggregate
+from scoring.scorer import compute_score
+from scoring.rating import rate
 from ui.components.header_metric import render_header_metric
 from ui.components.valuation_card import render_valuation_card
+from ui.components.score_breakdown import render_rating_pill, render_score_breakdown
+from ui.components.monte_carlo_chart import build_mc_distribution_figure
 
 
 # ============================================================
@@ -201,6 +210,13 @@ _DEMO_PRICE: dict[str, float] = {"AAPL": 185.0, "MSFT": 330.0, "JPM": 160.0}
 # DCF on FCFF doesn't apply to banks (no meaningful FCF). Skip cleanly.
 _NO_DCF: set[str] = {"JPM"}
 
+# GICS sector per demo ticker — drives the aggregator's model weights.
+_DEMO_SECTOR: dict[str, str] = {
+    "AAPL": "Technology",
+    "MSFT": "Technology",
+    "JPM":  "Financial Services",
+}
+
 
 if analyze or "eq_loaded" in st.session_state:
     data = _load_demo(ticker)
@@ -340,28 +356,124 @@ if analyze or "eq_loaded" in st.session_state:
         except (ValuationError, InsufficientDataError) as exc:
             cmp_error = str(exc)
 
-    # ---- Render the cards ----
-    vc1, vc2 = st.columns(2)
+    # ---- Monte Carlo (wraps DCF, so skip if no DCF) ----
+    mc_res = None
+    if dcf_res is not None:
+        try:
+            with st.spinner("Running 5,000 Monte Carlo simulations…"):
+                mc_res = run_monte_carlo(
+                    income=inc, balance=bal, cash=cf,
+                    wacc=wacc_res.wacc,
+                    n_simulations=5_000,
+                    current_price=current_price,
+                    stage1_years=params["projection_years"],
+                    seed=42,
+                )
+        except (ValuationError, InsufficientDataError):
+            mc_res = None
+
+    # ---- DDM (only if the company actually pays dividends) ----
+    ddm_res = None
+    if ddm_is_applicable(cf, inc):
+        try:
+            ddm_res = ddm_two_stage(
+                income=inc, balance=bal, cash=cf,
+                cost_of_equity=wacc_res.cost_of_equity,
+                stage1_years=params["projection_years"],
+                terminal_growth=params["terminal_growth"],
+            )
+        except (ValuationError, InsufficientDataError):
+            ddm_res = None
+
+    # ---- Residual Income ----
+    ri_res = None
+    try:
+        ri_res = run_residual_income(
+            income=inc, balance=bal,
+            cost_of_equity=wacc_res.cost_of_equity,
+            stage1_years=params["projection_years"],
+            stage1_growth=g_override,
+            terminal_growth=params["terminal_growth"],
+        )
+    except (ValuationError, InsufficientDataError):
+        ri_res = None
+
+    # ---- Aggregate the 5 estimates with sector weights ----
+    sector = _DEMO_SECTOR.get(ticker)
+    agg = aggregate(
+        dcf=dcf_res.intrinsic_value_per_share if dcf_res else None,
+        comparables=(cmp_res.implied_per_share_median
+                     if cmp_res and cmp_res.implied_per_share_median else None),
+        monte_carlo=mc_res.median if mc_res else None,
+        ddm=ddm_res.intrinsic_value_per_share if ddm_res else None,
+        residual_income=ri_res.intrinsic_value_per_share if ri_res else None,
+        sector=sector,
+    )
+
+    # ---- Composite score + final rating ----
+    upside = None
+    if (np.isfinite(agg.intrinsic_per_share)
+            and current_price and current_price > 0):
+        upside = (agg.intrinsic_per_share - current_price) / current_price
+
+    score_res = compute_score(
+        income=inc, balance=bal, cash=cf,
+        earnings_quality=eq,
+        intrinsic=agg.intrinsic_per_share if np.isfinite(agg.intrinsic_per_share) else None,
+        current_price=current_price,
+    )
+    rating_res = rate(
+        composite=score_res.composite,
+        upside=upside,
+        confidence=agg.confidence,
+    )
+
+    # ---- Render: rating pill + score breakdown side-by-side ----
+    rp1, rp2 = st.columns([3, 2])
+    with rp1:
+        render_rating_pill(rating_res)
+    with rp2:
+        if np.isfinite(agg.intrinsic_per_share):
+            render_valuation_card(
+                model=f"AGGREGATOR · {agg.profile.upper()}",
+                intrinsic=agg.intrinsic_per_share,
+                current_price=current_price,
+                range_low=agg.range_low,
+                range_high=agg.range_high,
+                sub_label=(
+                    f"{agg.n_models_used} models · CV {agg.dispersion_cv:.1%} · "
+                    f"confidence {agg.confidence}"
+                ),
+            )
+        else:
+            st.warning("No model produced a valid intrinsic estimate.")
+
+    st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+    render_score_breakdown(score_res)
+
+    # ---- Per-model cards (DCF · Comps · MC · DDM/RI) ----
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="eq-section-label">MODEL CONTRIBUTIONS</div>',
+        unsafe_allow_html=True,
+    )
+    vc1, vc2, vc3, vc4 = st.columns(4)
+
     with vc1:
         if dcf_res is not None:
             render_valuation_card(
                 model="DCF · 3-stage",
                 intrinsic=dcf_res.intrinsic_value_per_share,
                 current_price=current_price,
-                sub_label=(
-                    f"WACC {dcf_res.wacc:.2%} · g₁ {dcf_res.stage1_growth:.2%} "
-                    f"→ g_t {dcf_res.terminal_growth:.2%} · "
-                    f"{dcf_res.stage1_years}+{dcf_res.stage2_years}y"
-                ),
+                sub_label=(f"WACC {dcf_res.wacc:.1%} · g₁ {dcf_res.stage1_growth:.1%} "
+                           f"→ g_t {dcf_res.terminal_growth:.1%}"),
             )
         elif ticker in _NO_DCF:
-            render_valuation_card(
-                model="DCF · 3-stage",
-                intrinsic=None,
-                sub_label="N/A — financials are valued via DDM / RI, not FCFF DCF.",
-            )
+            render_valuation_card(model="DCF · 3-stage", intrinsic=None,
+                                  sub_label="N/A — bank, use DDM/RI.")
         else:
-            st.warning(f"DCF unavailable: {dcf_error}")
+            render_valuation_card(model="DCF · 3-stage", intrinsic=None,
+                                  sub_label=dcf_error or "unavailable")
 
     with vc2:
         if cmp_res is not None and cmp_res.implied_per_share_median is not None:
@@ -372,12 +484,52 @@ if analyze or "eq_loaded" in st.session_state:
                 current_price=current_price,
                 range_low=cmp_res.implied_per_share_low,
                 range_high=cmp_res.implied_per_share_high,
-                sub_label=f"{cmp_res.n_peers_input} peers · {mults_used} · {cmp_res.method.upper()}",
+                sub_label=f"{cmp_res.n_peers_input} peers · {mults_used}",
             )
-        elif cmp_error:
-            st.warning(f"Comparables unavailable: {cmp_error}")
         else:
-            st.info("No comparable peers configured for this ticker.")
+            render_valuation_card(model="COMPARABLES", intrinsic=None,
+                                  sub_label=cmp_error or "no peers")
+
+    with vc3:
+        if mc_res is not None:
+            render_valuation_card(
+                model="MONTE CARLO",
+                intrinsic=mc_res.median,
+                current_price=current_price,
+                range_low=mc_res.percentiles.get(25),
+                range_high=mc_res.percentiles.get(75),
+                sub_label=(f"{mc_res.n_simulations:,} sims · "
+                           f"P(undervalued) {mc_res.p_undervalued:.0%}"
+                           if mc_res.p_undervalued is not None
+                           else f"{mc_res.n_simulations:,} sims"),
+            )
+        else:
+            render_valuation_card(model="MONTE CARLO", intrinsic=None,
+                                  sub_label="requires DCF")
+
+    with vc4:
+        if ddm_res is not None:
+            render_valuation_card(
+                model="DDM · 2-stage",
+                intrinsic=ddm_res.intrinsic_value_per_share,
+                current_price=current_price,
+                sub_label=(f"DPS ${ddm_res.base_dividend:.2f} · "
+                           f"g₁ {ddm_res.stage1_growth:.1%} · "
+                           f"payout {ddm_res.payout_ratio:.0%}"
+                           if ddm_res.payout_ratio is not None
+                           else f"DPS ${ddm_res.base_dividend:.2f}"),
+            )
+        elif ri_res is not None:
+            render_valuation_card(
+                model="RESIDUAL INCOME",
+                intrinsic=ri_res.intrinsic_value_per_share,
+                current_price=current_price,
+                sub_label=(f"BV/sh ${ri_res.book_value_per_share:.2f} · "
+                           f"ROE {ri_res.base_roe:.1%}"),
+            )
+        else:
+            render_valuation_card(model="DDM / RI", intrinsic=None,
+                                  sub_label="not applicable")
 
     # ---- DCF projection table ----
     if dcf_res is not None:
@@ -457,9 +609,37 @@ if analyze or "eq_loaded" in st.session_state:
             },
         )
 
+    # ---- Monte Carlo distribution chart ----
+    if mc_res is not None:
+        st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+        st.markdown(
+            '<div class="eq-section-label">MONTE CARLO · INTRINSIC VALUE DISTRIBUTION</div>',
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(
+            build_mc_distribution_figure(
+                mc_res.intrinsic_distribution,
+                percentiles=mc_res.percentiles,
+                current_price=current_price,
+            ),
+            use_container_width=True, config={"displayModeBar": False},
+        )
+        mc_summary = pd.DataFrame([
+            {"Statistic": "Mean",     "Value": f"${mc_res.mean:,.2f}"},
+            {"Statistic": "Median",   "Value": f"${mc_res.median:,.2f}"},
+            {"Statistic": "Std dev",  "Value": f"${mc_res.std:,.2f}"},
+            *[
+                {"Statistic": f"Percentile {p}", "Value": f"${v:,.2f}"}
+                for p, v in mc_res.percentiles.items()
+            ],
+            {"Statistic": "Sims that failed validation",
+             "Value": f"{mc_res.n_failed:,} / {mc_res.n_simulations:,}"},
+        ])
+        st.dataframe(mc_summary, hide_index=True, use_container_width=True)
+
     st.caption(
-        "Monte Carlo, RI and DDM models will be wired in next. "
-        "Demo peer set; FMP screener replaces it once the live provider is online."
+        "Demo peer set; FMP screener replaces it once the live provider is online. "
+        "DDM only fires for tickers with a payout ratio ≥ 20%; non-payers fall back to RI."
     )
 else:
     st.markdown(
