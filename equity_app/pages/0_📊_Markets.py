@@ -30,7 +30,6 @@ from data.market_data import (
     INDEX_META,
     get_indices, get_index_history,
     get_movers, get_movers_by_sector,
-    get_sector_performance,
 )
 from ui.charts.sp500_chart import build_sp500_figure
 from ui.components.index_card import render_index_card
@@ -38,7 +37,6 @@ from ui.components.market_status import render_status_live
 from ui.components.movers_table import render_movers, render_movers_grouped
 from ui.components.period_selector import render_period_selector, to_yf_period
 from ui.components.header_metric import render_header_metric
-from ui.components.sector_heatmap import render_sector_heatmap
 
 
 # ============================================================
@@ -135,20 +133,7 @@ st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
 # ============================================================
-# 4 — Sector performance heatmap
-# ============================================================
-st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
-st.markdown(
-    '<div class="eq-section-label">SECTOR PERFORMANCE</div>',
-    unsafe_allow_html=True,
-)
-
-sectors_df = get_sector_performance()
-render_sector_heatmap(sectors_df, height=240)
-
-
-# ============================================================
-# 5 — Top movers (universe + sort + sector segmentation)
+# 4 — Top movers (universe + sort + sector segmentation)
 # ============================================================
 st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
 
