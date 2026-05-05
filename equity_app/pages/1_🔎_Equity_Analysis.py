@@ -1,11 +1,11 @@
 """
 Equity analysis — single-stock deep-dive.
 
-Sidebar holds the WACC / DCF parameters (collapsed by default at the
-session level). Main area: ticker input → header metrics → ratios table.
-
-Note: full valuation models land in Session 3. This page wires the
-ratios layer (Session 2) into the new theme.
+Sidebar is no longer used for WACC; instead, the **ASSUMPTIONS** panel
+(an inline expander) lives between the header metrics and the valuation
+section. All five valuation models, the aggregator, the score and the
+final rating run through ``core.valuation_pipeline.run_valuation`` so
+that any change to an assumption automatically re-runs everything.
 """
 from __future__ import annotations
 import sys
@@ -15,191 +15,35 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from core.constants import DEFAULT_WACC_PARAMS, DCF_DEFAULTS
-from core.exceptions import ValuationError, InsufficientDataError
+from analysis.assumptions import (
+    Assumptions, calculate_default_assumptions,
+)
 from analysis.ratios import calculate_ratios
 from analysis.earnings_quality import assess_earnings_quality
-from analysis.wacc import calculate_wacc
+from core.exceptions import ValuationError, InsufficientDataError
+from core.valuation_pipeline import run_valuation
 from data.ticker_universe import SP500_TOP, labels as ticker_labels, ticker_from_label
-from valuation.dcf_three_stage import run_dcf, sensitivity_table
-from valuation.comparables import (
-    PeerSnapshot, TargetFundamentals,
-    value_by_comparables, comparables_table,
+from data.user_assumptions_db import (
+    save_assumptions, load_assumptions_with_meta, delete_assumptions,
+    IS_PERSISTENT,
 )
-from valuation.monte_carlo import run_monte_carlo
-from valuation.ddm import two_stage as ddm_two_stage, is_applicable as ddm_is_applicable
-from valuation.residual_income import run_residual_income
-from valuation.valuation_aggregator import aggregate
-from scoring.scorer import compute_score
-from scoring.rating import rate
+from valuation.comparables import PeerSnapshot, comparables_table
+from valuation.dcf_three_stage import sensitivity_table
 from ui.components.header_metric import render_header_metric
 from ui.components.valuation_card import render_valuation_card
 from ui.components.score_breakdown import render_rating_pill, render_score_breakdown
 from ui.components.monte_carlo_chart import build_mc_distribution_figure
+from ui.components.assumptions_panel import render_assumptions_panel
 
 
 # ============================================================
-# Sidebar — WACC + DCF parameters with tooltips and reset
-# ============================================================
-def _wacc_sidebar() -> dict:
-    with st.sidebar:
-        st.markdown(
-            f'<div style="color: var(--accent); font-size: 11px; '
-            f'font-weight: 500; letter-spacing: 1px; text-transform: uppercase; '
-            f'padding: 4px 0 8px 0; border-bottom: 1px solid var(--border); '
-            f'margin-bottom: 12px;">WACC components</div>',
-            unsafe_allow_html=True,
-        )
-
-        params: dict = {}
-        params["beta"] = st.number_input(
-            "Beta", value=1.20, step=0.10, format="%.2f",
-            help="Equity beta — sensitivity to the broad market. Computed via OLS regression in production.",
-        )
-        params["risk_free"] = st.number_input(
-            "Risk-free rate",
-            value=DEFAULT_WACC_PARAMS["risk_free_rate"],
-            step=0.005, format="%.3f",
-            help="10Y US Treasury yield. Sourced from FRED in production.",
-        )
-        params["erp"] = st.number_input(
-            "Equity risk premium",
-            value=DEFAULT_WACC_PARAMS["market_risk_premium"],
-            step=0.005, format="%.3f",
-            help="Expected return of equities over the risk-free rate. Damodaran's USA value.",
-        )
-        params["cost_of_debt"] = st.number_input(
-            "Cost of debt (pre-tax)",
-            value=DEFAULT_WACC_PARAMS["cost_of_debt"],
-            step=0.005, format="%.3f",
-            help="Interest expense / average total debt over the last 3 years.",
-        )
-        params["tax_rate"] = st.number_input(
-            "Tax rate",
-            value=DEFAULT_WACC_PARAMS["tax_rate"],
-            step=0.05, format="%.2f",
-            help="Effective tax rate (3-year average).",
-        )
-
-        st.markdown(
-            f'<div style="color: var(--accent); font-size: 11px; '
-            f'font-weight: 500; letter-spacing: 1px; text-transform: uppercase; '
-            f'padding: 4px 0 8px 0; border-bottom: 1px solid var(--border); '
-            f'margin: 18px 0 12px 0;">Capital structure</div>',
-            unsafe_allow_html=True,
-        )
-        we = st.number_input(
-            "Equity %", value=DEFAULT_WACC_PARAMS["weight_equity"] * 100,
-            min_value=0.0, max_value=100.0, step=5.0, format="%.1f",
-            help="Equity weight in the capital structure. Use market values, not book.",
-        )
-        params["weight_equity"] = we / 100.0
-        params["weight_debt"] = 1.0 - params["weight_equity"]
-
-        st.markdown(
-            f'<div style="color: var(--accent); font-size: 11px; '
-            f'font-weight: 500; letter-spacing: 1px; text-transform: uppercase; '
-            f'padding: 4px 0 8px 0; border-bottom: 1px solid var(--border); '
-            f'margin: 18px 0 12px 0;">Projection</div>',
-            unsafe_allow_html=True,
-        )
-        params["projection_years"] = st.number_input(
-            "Years", value=int(DCF_DEFAULTS["stage1_years"]),
-            min_value=3, max_value=10, step=1,
-            help="Number of explicit projection years before terminal value.",
-        )
-        params["terminal_growth"] = st.number_input(
-            "Terminal growth",
-            value=DCF_DEFAULTS["terminal_growth"],
-            step=0.005, format="%.3f",
-            help="Long-run growth rate. Should not exceed nominal GDP growth (~4%).",
-        )
-        params["override_growth"] = st.number_input(
-            "Override growth (0 = CAGR)",
-            value=0.0, step=0.01, format="%.2f",
-            help="Force a specific FCF growth rate. Set to 0 to use the historical CAGR.",
-        )
-
-        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
-        if st.button("Reset to defaults", type="secondary", use_container_width=True):
-            for k in list(st.session_state.keys()):
-                if k.startswith("FormSubmitter") or k.startswith("$"):
-                    continue
-            st.rerun()
-
-        return params
-
-
-params = _wacc_sidebar()
-
-
-# ============================================================
-# Main area
-# ============================================================
-st.markdown(
-    '<div class="eq-section-label">EQUITY ANALYSIS</div>',
-    unsafe_allow_html=True,
-)
-
-# ---- Ticker search ("la lupa") ----
-# st.selectbox is type-searchable out of the box: typing "App" filters to
-# AAPL · Apple Inc. The custom-ticker toggle reveals a free-text input
-# for anything outside the curated S&P 500 universe.
-_LABELS: list[str] = ticker_labels(SP500_TOP)
-
-# Tiny uppercase labels above each control for orientation
-lab1, lab2, lab3, lab4 = st.columns([0.9, 4.0, 2.0, 1.1])
-with lab1: st.markdown('<div class="eq-section-label">MODE</div>', unsafe_allow_html=True)
-with lab2: st.markdown('<div class="eq-section-label">TICKER</div>', unsafe_allow_html=True)
-with lab3: st.markdown('<div class="eq-section-label">PEERS</div>', unsafe_allow_html=True)
-with lab4: st.markdown('<div class="eq-section-label">&nbsp;</div>', unsafe_allow_html=True)
-
-ic1, ic2, ic3, ic4 = st.columns([0.9, 4.0, 2.0, 1.1])
-with ic1:
-    use_custom = st.toggle(
-        "Custom",
-        value=False,
-        help="Toggle on to type any ticker outside the curated S&P 500 list.",
-    )
-with ic2:
-    if use_custom:
-        ticker = st.text_input(
-            "Ticker", value="AAPL", label_visibility="collapsed",
-            placeholder="Type a ticker (e.g. AAPL)",
-        ).strip().upper()
-    else:
-        default_idx = next(
-            (i for i, lbl in enumerate(_LABELS)
-             if lbl.startswith("AAPL ")),
-            0,
-        )
-        chosen_label = st.selectbox(
-            "Ticker",
-            options=_LABELS,
-            index=default_idx,
-            label_visibility="collapsed",
-            placeholder="🔎  Search ticker or company…",
-        )
-        ticker = ticker_from_label(chosen_label)
-with ic3:
-    peers = st.text_input(
-        "Peers", value="MSFT,GOOGL,META",
-        label_visibility="collapsed",
-        placeholder="Comma-separated",
-    )
-with ic4:
-    analyze = st.button(
-        "Analyze", type="primary", use_container_width=True,
-    )
-
-
-# ============================================================
-# Demo mode — uses Session 2 fixtures so this page works without an
-# FMP API key. Once the orchestrator lands, swap to the live provider.
+# Demo fixtures + curated metadata
 # ============================================================
 def _load_demo(ticker: str):
     from tests.fixtures import aapl_fy2023, msft_fy2023, jpm_fy2023
@@ -210,8 +54,6 @@ def _load_demo(ticker: str):
     return None
 
 
-# Hand-curated demo peer snapshots (USD, FY2023). Replaced by the FMP
-# screener once the live provider is wired in.
 _DEMO_PEERS: dict[str, list[PeerSnapshot]] = {
     "AAPL": [
         PeerSnapshot("MSFT",  market_cap=2_900e9, enterprise_value=2_950e9,
@@ -242,13 +84,8 @@ _DEMO_PEERS: dict[str, list[PeerSnapshot]] = {
     ],
 }
 
-# Approximate prices around the fiscal year end — used to compute upside.
 _DEMO_PRICE: dict[str, float] = {"AAPL": 185.0, "MSFT": 330.0, "JPM": 160.0}
-
-# DCF on FCFF doesn't apply to banks (no meaningful FCF). Skip cleanly.
-_NO_DCF: set[str] = {"JPM"}
-
-# GICS sector per demo ticker — drives the aggregator's model weights.
+_DEMO_MARKET_CAP: dict[str, float] = {"AAPL": 2_950e9, "MSFT": 2_460e9, "JPM": 470e9}
 _DEMO_SECTOR: dict[str, str] = {
     "AAPL": "Technology",
     "MSFT": "Technology",
@@ -256,432 +93,449 @@ _DEMO_SECTOR: dict[str, str] = {
 }
 
 
-if analyze or "eq_loaded" in st.session_state:
-    data = _load_demo(ticker)
-    if data is None:
-        st.info(
-            f"`{ticker}` is not in the local fixture set. "
-            "Live FMP fetch arrives in a later session — meanwhile try AAPL, MSFT or JPM."
-        )
-        st.stop()
-    st.session_state["eq_loaded"] = True
+# ============================================================
+# Page header — ticker selector
+# ============================================================
+st.markdown(
+    '<div class="eq-section-label">EQUITY ANALYSIS</div>',
+    unsafe_allow_html=True,
+)
 
-    inc, bal, cf = data
-    ratios = calculate_ratios(inc, bal, cf)
-    eq = assess_earnings_quality(inc, bal, cf)
+_LABELS: list[str] = ticker_labels(SP500_TOP)
 
-    last = ratios.iloc[-1]
-    rev = float(last["Revenue"]) if "Revenue" in last else None
-    net_margin = float(last["Net Margin %"]) if "Net Margin %" in last else None
-    roic = float(last["ROIC %"]) if "ROIC %" in last else None
+lab1, lab2, lab3, lab4 = st.columns([0.9, 4.0, 2.0, 1.1])
+with lab1: st.markdown('<div class="eq-section-label">MODE</div>', unsafe_allow_html=True)
+with lab2: st.markdown('<div class="eq-section-label">TICKER</div>', unsafe_allow_html=True)
+with lab3: st.markdown('<div class="eq-section-label">PEERS</div>', unsafe_allow_html=True)
+with lab4: st.markdown('<div class="eq-section-label">&nbsp;</div>', unsafe_allow_html=True)
 
-    h1, h2, h3, h4 = st.columns(4)
-    with h1: render_header_metric("Revenue (latest)",
-                                  f"${rev/1e9:,.2f}B" if rev else "—")
-    with h2: render_header_metric("Net margin",
-                                  f"{net_margin:.2f}%" if net_margin is not None else "—")
-    with h3: render_header_metric("ROIC",
-                                  f"{roic:.2f}%" if roic is not None else "—")
-    with h4: render_header_metric("EQ flag", eq.overall_flag.upper())
-
-    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-    st.markdown(
-        '<div class="eq-section-label">FINANCIAL RATIOS</div>',
-        unsafe_allow_html=True,
+ic1, ic2, ic3, ic4 = st.columns([0.9, 4.0, 2.0, 1.1])
+with ic1:
+    use_custom = st.toggle(
+        "Custom", value=False,
+        help="Toggle on to type any ticker outside the curated S&P 500 list.",
     )
-
-    show_cols = [
-        c for c in (
-            "Gross Margin %", "Operating Margin %", "EBITDA Margin %", "Net Margin %",
-            "ROE %", "ROA %", "ROIC %",
-            "Debt/Equity", "Current Ratio",
-            "FCF Margin %", "FCF Adj Margin %", "Cash Conversion",
-        ) if c in ratios.columns
-    ]
-    transposed = ratios[show_cols].T
-    transposed.columns = [d.strftime("%Y") if hasattr(d, "strftime") else str(d)
-                          for d in transposed.columns]
-    st.dataframe(transposed.round(2), use_container_width=True, height=440)
-
-    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-    st.markdown(
-        '<div class="eq-section-label">EARNINGS QUALITY</div>',
-        unsafe_allow_html=True,
+with ic2:
+    if use_custom:
+        ticker = st.text_input(
+            "Ticker", value="AAPL", label_visibility="collapsed",
+            placeholder="Type a ticker (e.g. AAPL)",
+        ).strip().upper()
+    else:
+        default_idx = next(
+            (i for i, lbl in enumerate(_LABELS) if lbl.startswith("AAPL ")),
+            0,
+        )
+        chosen_label = st.selectbox(
+            "Ticker", options=_LABELS, index=default_idx,
+            label_visibility="collapsed",
+            placeholder="🔎  Search ticker or company…",
+        )
+        ticker = ticker_from_label(chosen_label)
+with ic3:
+    peers_raw = st.text_input(
+        "Peers", value="MSFT,GOOGL,META",
+        label_visibility="collapsed",
+        placeholder="Comma-separated",
     )
-    flags = [f for f in (eq.beneish, eq.piotroski, eq.sloan) if f is not None]
-    if flags:
-        rows = pd.DataFrame([{
-            "Metric": f.name,
-            "Score": f.score,
-            "Flag": f.flag.upper(),
-            "Explanation": f.explanation,
-        } for f in flags])
-        st.dataframe(
-            rows,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Score": st.column_config.NumberColumn(format="%.2f"),
-            },
-        )
+with ic4:
+    analyze = st.button("Analyze", type="primary", use_container_width=True)
 
-    # ============================================================
-    # VALUATION — DCF + comparables
-    # ============================================================
-    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-    st.markdown(
-        '<div class="eq-section-label">VALUATION</div>',
-        unsafe_allow_html=True,
-    )
 
-    try:
-        wacc_res = calculate_wacc(
-            risk_free=params["risk_free"],
-            equity_risk_premium=params["erp"],
-            beta=params["beta"],
-            cost_of_debt_pretax=params["cost_of_debt"],
-            tax_rate=params["tax_rate"],
-            weight_equity=params["weight_equity"],
-            weight_debt=params["weight_debt"],
-        )
-    except ValuationError as exc:
-        st.error(f"WACC inputs invalid: {exc}")
-        st.stop()
+# ============================================================
+# Main flow
+# ============================================================
+if analyze:
+    st.session_state["eq_active_ticker"] = ticker
 
-    current_price = _DEMO_PRICE.get(ticker)
-    g_override = params["override_growth"] or None  # 0 ⇒ use historical CAGR
+active_ticker: str | None = st.session_state.get("eq_active_ticker")
 
-    # ---- DCF card + projection ----
-    dcf_res = None
-    dcf_error: str | None = None
-    if ticker not in _NO_DCF:
-        try:
-            dcf_res = run_dcf(
-                income=inc, balance=bal, cash=cf,
-                wacc=wacc_res.wacc,
-                stage1_growth=g_override,
-                stage1_years=params["projection_years"],
-                terminal_growth=params["terminal_growth"],
-            )
-        except (ValuationError, InsufficientDataError) as exc:
-            dcf_error = str(exc)
-
-    # ---- Comparables card ----
-    cmp_res = None
-    cmp_error: str | None = None
-    peers_demo = _DEMO_PEERS.get(ticker, [])
-    if peers_demo:
-        last_inc = inc.iloc[-1]
-        last_bal = bal.iloc[-1]
-
-        def _pick(row, *keys):
-            for k in keys:
-                if k in row and pd.notna(row[k]):
-                    return float(row[k])
-            return None
-
-        target_fund = TargetFundamentals(
-            net_income=_pick(last_inc, "netIncome"),
-            revenue=_pick(last_inc, "revenue"),
-            ebitda=_pick(last_inc, "ebitda"),
-            book_value=_pick(last_bal, "totalStockholdersEquity"),
-            shares_outstanding=_pick(last_inc, "weightedAverageShsOut"),
-            cash=_pick(last_bal, "cashAndCashEquivalents") or 0.0,
-            debt=_pick(last_bal, "totalDebt") or 0.0,
-        )
-        try:
-            cmp_res = value_by_comparables(peers=peers_demo, target=target_fund)
-        except (ValuationError, InsufficientDataError) as exc:
-            cmp_error = str(exc)
-
-    # ---- Monte Carlo (wraps DCF, so skip if no DCF) ----
-    mc_res = None
-    if dcf_res is not None:
-        try:
-            with st.spinner("Running 5,000 Monte Carlo simulations…"):
-                mc_res = run_monte_carlo(
-                    income=inc, balance=bal, cash=cf,
-                    wacc=wacc_res.wacc,
-                    n_simulations=5_000,
-                    current_price=current_price,
-                    stage1_years=params["projection_years"],
-                    seed=42,
-                )
-        except (ValuationError, InsufficientDataError):
-            mc_res = None
-
-    # ---- DDM (only if the company actually pays dividends) ----
-    ddm_res = None
-    if ddm_is_applicable(cf, inc):
-        try:
-            ddm_res = ddm_two_stage(
-                income=inc, balance=bal, cash=cf,
-                cost_of_equity=wacc_res.cost_of_equity,
-                stage1_years=params["projection_years"],
-                terminal_growth=params["terminal_growth"],
-            )
-        except (ValuationError, InsufficientDataError):
-            ddm_res = None
-
-    # ---- Residual Income ----
-    ri_res = None
-    try:
-        ri_res = run_residual_income(
-            income=inc, balance=bal,
-            cost_of_equity=wacc_res.cost_of_equity,
-            stage1_years=params["projection_years"],
-            stage1_growth=g_override,
-            terminal_growth=params["terminal_growth"],
-        )
-    except (ValuationError, InsufficientDataError):
-        ri_res = None
-
-    # ---- Aggregate the 5 estimates with sector weights ----
-    sector = _DEMO_SECTOR.get(ticker)
-    agg = aggregate(
-        dcf=dcf_res.intrinsic_value_per_share if dcf_res else None,
-        comparables=(cmp_res.implied_per_share_median
-                     if cmp_res and cmp_res.implied_per_share_median else None),
-        monte_carlo=mc_res.median if mc_res else None,
-        ddm=ddm_res.intrinsic_value_per_share if ddm_res else None,
-        residual_income=ri_res.intrinsic_value_per_share if ri_res else None,
-        sector=sector,
-    )
-
-    # ---- Composite score + final rating ----
-    upside = None
-    if (np.isfinite(agg.intrinsic_per_share)
-            and current_price and current_price > 0):
-        upside = (agg.intrinsic_per_share - current_price) / current_price
-
-    score_res = compute_score(
-        income=inc, balance=bal, cash=cf,
-        earnings_quality=eq,
-        intrinsic=agg.intrinsic_per_share if np.isfinite(agg.intrinsic_per_share) else None,
-        current_price=current_price,
-    )
-    rating_res = rate(
-        composite=score_res.composite,
-        upside=upside,
-        confidence=agg.confidence,
-    )
-
-    # ---- Render: rating pill + score breakdown side-by-side ----
-    rp1, rp2 = st.columns([3, 2])
-    with rp1:
-        render_rating_pill(rating_res)
-    with rp2:
-        if np.isfinite(agg.intrinsic_per_share):
-            render_valuation_card(
-                model=f"AGGREGATOR · {agg.profile.upper()}",
-                intrinsic=agg.intrinsic_per_share,
-                current_price=current_price,
-                range_low=agg.range_low,
-                range_high=agg.range_high,
-                sub_label=(
-                    f"{agg.n_models_used} models · CV {agg.dispersion_cv:.1%} · "
-                    f"confidence {agg.confidence}"
-                ),
-            )
-        else:
-            st.warning("No model produced a valid intrinsic estimate.")
-
-    st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-    render_score_breakdown(score_res)
-
-    # ---- Per-model cards (DCF · Comps · MC · DDM/RI) ----
-    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-    st.markdown(
-        '<div class="eq-section-label">MODEL CONTRIBUTIONS</div>',
-        unsafe_allow_html=True,
-    )
-    vc1, vc2, vc3, vc4 = st.columns(4)
-
-    with vc1:
-        if dcf_res is not None:
-            render_valuation_card(
-                model="DCF · 3-stage",
-                intrinsic=dcf_res.intrinsic_value_per_share,
-                current_price=current_price,
-                sub_label=(f"WACC {dcf_res.wacc:.1%} · g₁ {dcf_res.stage1_growth:.1%} "
-                           f"→ g_t {dcf_res.terminal_growth:.1%}"),
-            )
-        elif ticker in _NO_DCF:
-            render_valuation_card(model="DCF · 3-stage", intrinsic=None,
-                                  sub_label="N/A — bank, use DDM/RI.")
-        else:
-            render_valuation_card(model="DCF · 3-stage", intrinsic=None,
-                                  sub_label=dcf_error or "unavailable")
-
-    with vc2:
-        if cmp_res is not None and cmp_res.implied_per_share_median is not None:
-            mults_used = ", ".join(cmp_res.multiples.keys())
-            render_valuation_card(
-                model="COMPARABLES",
-                intrinsic=cmp_res.implied_per_share_median,
-                current_price=current_price,
-                range_low=cmp_res.implied_per_share_low,
-                range_high=cmp_res.implied_per_share_high,
-                sub_label=f"{cmp_res.n_peers_input} peers · {mults_used}",
-            )
-        else:
-            render_valuation_card(model="COMPARABLES", intrinsic=None,
-                                  sub_label=cmp_error or "no peers")
-
-    with vc3:
-        if mc_res is not None:
-            render_valuation_card(
-                model="MONTE CARLO",
-                intrinsic=mc_res.median,
-                current_price=current_price,
-                range_low=mc_res.percentiles.get(25),
-                range_high=mc_res.percentiles.get(75),
-                sub_label=(f"{mc_res.n_simulations:,} sims · "
-                           f"P(undervalued) {mc_res.p_undervalued:.0%}"
-                           if mc_res.p_undervalued is not None
-                           else f"{mc_res.n_simulations:,} sims"),
-            )
-        else:
-            render_valuation_card(model="MONTE CARLO", intrinsic=None,
-                                  sub_label="requires DCF")
-
-    with vc4:
-        if ddm_res is not None:
-            render_valuation_card(
-                model="DDM · 2-stage",
-                intrinsic=ddm_res.intrinsic_value_per_share,
-                current_price=current_price,
-                sub_label=(f"DPS ${ddm_res.base_dividend:.2f} · "
-                           f"g₁ {ddm_res.stage1_growth:.1%} · "
-                           f"payout {ddm_res.payout_ratio:.0%}"
-                           if ddm_res.payout_ratio is not None
-                           else f"DPS ${ddm_res.base_dividend:.2f}"),
-            )
-        elif ri_res is not None:
-            render_valuation_card(
-                model="RESIDUAL INCOME",
-                intrinsic=ri_res.intrinsic_value_per_share,
-                current_price=current_price,
-                sub_label=(f"BV/sh ${ri_res.book_value_per_share:.2f} · "
-                           f"ROE {ri_res.base_roe:.1%}"),
-            )
-        else:
-            render_valuation_card(model="DDM / RI", intrinsic=None,
-                                  sub_label="not applicable")
-
-    # ---- DCF projection table ----
-    if dcf_res is not None:
-        st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-        st.markdown(
-            '<div class="eq-section-label">DCF — FCF PROJECTION (USD MM)</div>',
-            unsafe_allow_html=True,
-        )
-        proj = pd.DataFrame({
-            "Year":      [f"Y{i+1}" for i in range(len(dcf_res.projected_fcf))],
-            "Growth":    [f"{g*100:.2f}%" for g in dcf_res.growth_path],
-            "FCF":       [v / 1e6 for v in dcf_res.projected_fcf],
-            "Discount":  [f"{d:.4f}" for d in dcf_res.discount_factors],
-            "PV":        [v / 1e6 for v in dcf_res.pv_per_year],
-        })
-        st.dataframe(
-            proj,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "FCF": st.column_config.NumberColumn(format="%.0f"),
-                "PV":  st.column_config.NumberColumn(format="%.0f"),
-            },
-        )
-        ev_split = pd.DataFrame([{
-            "Component":            "PV of explicit FCF",
-            "USD (B)":              dcf_res.pv_explicit / 1e9,
-            "Share of EV":          dcf_res.pv_explicit / dcf_res.enterprise_value * 100,
-        }, {
-            "Component":            "PV of terminal value",
-            "USD (B)":              dcf_res.pv_terminal / 1e9,
-            "Share of EV":          dcf_res.pv_terminal / dcf_res.enterprise_value * 100,
-        }])
-        st.dataframe(
-            ev_split, hide_index=True, use_container_width=True,
-            column_config={
-                "USD (B)":     st.column_config.NumberColumn(format="%.2f"),
-                "Share of EV": st.column_config.NumberColumn(format="%.1f%%"),
-            },
-        )
-
-    # ---- Sensitivity table ----
-    if dcf_res is not None:
-        st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-        st.markdown(
-            '<div class="eq-section-label">SENSITIVITY · INTRINSIC $/SHARE</div>',
-            unsafe_allow_html=True,
-        )
-        wacc_grid = [round(wacc_res.wacc + d, 4) for d in (-0.02, -0.01, 0.0, 0.01, 0.02)]
-        g_grid    = [round(params["terminal_growth"] + d, 4)
-                     for d in (-0.01, -0.005, 0.0, 0.005, 0.01)]
-        sens = sensitivity_table(
-            income=inc, balance=bal, cash=cf,
-            wacc_grid=wacc_grid, g_grid=g_grid,
-            stage1_growth=g_override,
-        )
-        sens.index   = [f"{w:.2%}" for w in sens.index]
-        sens.columns = [f"{g:.2%}" for g in sens.columns]
-        sens.index.name = "WACC ↓ / g →"
-        st.dataframe(sens.round(2), use_container_width=True)
-
-    # ---- Comparables breakdown ----
-    if cmp_res is not None and cmp_res.multiples:
-        st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-        st.markdown(
-            '<div class="eq-section-label">COMPARABLES BREAKDOWN</div>',
-            unsafe_allow_html=True,
-        )
-        tbl = comparables_table(cmp_res)
-        st.dataframe(
-            tbl, hide_index=True, use_container_width=True,
-            column_config={
-                "Median":          st.column_config.NumberColumn(format="%.2f"),
-                "P25":             st.column_config.NumberColumn(format="%.2f"),
-                "P75":             st.column_config.NumberColumn(format="%.2f"),
-                "Implied $/share": st.column_config.NumberColumn(format="$%.2f"),
-            },
-        )
-
-    # ---- Monte Carlo distribution chart ----
-    if mc_res is not None:
-        st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-        st.markdown(
-            '<div class="eq-section-label">MONTE CARLO · INTRINSIC VALUE DISTRIBUTION</div>',
-            unsafe_allow_html=True,
-        )
-        st.plotly_chart(
-            build_mc_distribution_figure(
-                mc_res.intrinsic_distribution,
-                percentiles=mc_res.percentiles,
-                current_price=current_price,
-            ),
-            use_container_width=True, config={"displayModeBar": False},
-        )
-        mc_summary = pd.DataFrame([
-            {"Statistic": "Mean",     "Value": f"${mc_res.mean:,.2f}"},
-            {"Statistic": "Median",   "Value": f"${mc_res.median:,.2f}"},
-            {"Statistic": "Std dev",  "Value": f"${mc_res.std:,.2f}"},
-            *[
-                {"Statistic": f"Percentile {p}", "Value": f"${v:,.2f}"}
-                for p, v in mc_res.percentiles.items()
-            ],
-            {"Statistic": "Sims that failed validation",
-             "Value": f"{mc_res.n_failed:,} / {mc_res.n_simulations:,}"},
-        ])
-        st.dataframe(mc_summary, hide_index=True, use_container_width=True)
-
-    st.caption(
-        "Demo peer set; FMP screener replaces it once the live provider is online. "
-        "DDM only fires for tickers with a payout ratio ≥ 20%; non-payers fall back to RI."
-    )
-else:
+if active_ticker is None:
     st.markdown(
         '<div class="eq-card" style="text-align:center; padding:48px 16px; '
-        'color:var(--text-muted);">Enter a ticker and press Analyze.</div>',
+        'color:var(--text-muted);">Pick a ticker and press Analyze.</div>',
         unsafe_allow_html=True,
     )
+    st.stop()
+
+
+# ---- Load financials (demo only for now) ----
+data = _load_demo(active_ticker)
+if data is None:
+    st.info(
+        f"`{active_ticker}` is not in the local fixture set. "
+        "Live FMP fetch arrives in a later session — meanwhile try AAPL, MSFT or JPM."
+    )
+    st.stop()
+
+inc, bal, cf = data
+ratios = calculate_ratios(inc, bal, cf)
+eq = assess_earnings_quality(inc, bal, cf)
+
+
+# ============================================================
+# Header metrics
+# ============================================================
+last = ratios.iloc[-1]
+rev = float(last["Revenue"]) if "Revenue" in last else None
+net_margin = float(last["Net Margin %"]) if "Net Margin %" in last else None
+roic = float(last["ROIC %"]) if "ROIC %" in last else None
+current_price = _DEMO_PRICE.get(active_ticker)
+
+h1, h2, h3, h4 = st.columns(4)
+with h1: render_header_metric("Revenue (latest)", f"${rev/1e9:,.2f}B" if rev else "—")
+with h2: render_header_metric("Net margin",       f"{net_margin:.2f}%" if net_margin is not None else "—")
+with h3: render_header_metric("ROIC",             f"{roic:.2f}%" if roic is not None else "—")
+with h4: render_header_metric("EQ flag",          eq.overall_flag.upper())
+
+
+# ============================================================
+# ASSUMPTIONS panel — replaces the old WACC sidebar
+# ============================================================
+st.markdown("<div style='height: 18px;'></div>", unsafe_allow_html=True)
+
+base_assumptions: Assumptions = calculate_default_assumptions(
+    income=inc, balance=bal, cash=cf,
+    beta_override=1.20,
+    market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+)
+
+# Offer to load any saved custom assumptions on the first visit per session.
+saved_meta = load_assumptions_with_meta(active_ticker)
+loaded_offered_key = f"_load_offered_{active_ticker}"
+if saved_meta is not None and loaded_offered_key not in st.session_state:
+    st.session_state[loaded_offered_key] = True
+    saved_params, saved_ts = saved_meta
+    try:
+        ts_pretty = datetime.fromisoformat(saved_ts).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        ts_pretty = saved_ts
+
+    cl, cr1, cr2 = st.columns([3, 1, 1])
+    with cl:
+        st.info(
+            f"You have saved custom assumptions for **{active_ticker}** "
+            f"from **{ts_pretty}**.",
+            icon="💾",
+        )
+    with cr1:
+        if st.button("Load saved", key=f"load_saved_{active_ticker}",
+                     use_container_width=True):
+            st.session_state[f"assumptions_{active_ticker}_user"] = saved_params
+            st.session_state[f"preset_{active_ticker}"] = "Custom"
+            st.rerun()
+    with cr2:
+        if st.button("Discard", key=f"discard_saved_{active_ticker}",
+                     type="secondary", use_container_width=True):
+            delete_assumptions(active_ticker)
+            del st.session_state[loaded_offered_key]
+            st.rerun()
+
+if not IS_PERSISTENT:
+    st.caption(
+        "⚠ Assumptions DB is on a non-persistent path — "
+        "saves last only for the current Streamlit session."
+    )
+
+assumptions: Assumptions = render_assumptions_panel(
+    ticker=active_ticker,
+    base=base_assumptions,
+    expanded=(f"_panel_visited_{active_ticker}" not in st.session_state),
+    on_save=lambda a: save_assumptions(active_ticker, a.to_dict()),
+    on_reset=lambda: delete_assumptions(active_ticker),
+)
+st.session_state[f"_panel_visited_{active_ticker}"] = True
+
+if base_assumptions.warnings:
+    with st.expander("ℹ Default-derivation notes", expanded=False):
+        for w in base_assumptions.warnings:
+            st.markdown(f"- {w}")
+
+
+# ============================================================
+# Valuation pipeline (re-runs on every assumption change)
+# ============================================================
+peers_demo = _DEMO_PEERS.get(active_ticker, [])
+sector = _DEMO_SECTOR.get(active_ticker)
+
+with st.spinner("Running valuation pipeline…"):
+    try:
+        results = run_valuation(
+            ticker=active_ticker,
+            income=inc, balance=bal, cash=cf,
+            assumptions=assumptions,
+            peers=peers_demo,
+            earnings_quality=eq,
+            current_price=current_price,
+            sector=sector,
+        )
+    except (ValuationError, InsufficientDataError) as exc:
+        st.error(f"Valuation pipeline failed: {exc}")
+        st.stop()
+
+
+# ============================================================
+# Section: rating + aggregator + score breakdown
+# ============================================================
+st.markdown("<div style='height: 22px;'></div>", unsafe_allow_html=True)
+st.markdown(
+    '<div class="eq-section-label">VALUATION</div>',
+    unsafe_allow_html=True,
+)
+
+rp1, rp2 = st.columns([3, 2])
+with rp1:
+    render_rating_pill(results.rating)
+with rp2:
+    if np.isfinite(results.aggregator.intrinsic_per_share):
+        render_valuation_card(
+            model=f"AGGREGATOR · {results.aggregator.profile.upper()}",
+            intrinsic=results.aggregator.intrinsic_per_share,
+            current_price=current_price,
+            range_low=results.aggregator.range_low,
+            range_high=results.aggregator.range_high,
+            sub_label=(
+                f"{results.aggregator.n_models_used} models · "
+                f"CV {results.aggregator.dispersion_cv:.1%} · "
+                f"confidence {results.aggregator.confidence}"
+            ),
+        )
+    else:
+        st.warning("No model produced a valid intrinsic estimate.")
+
+st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+render_score_breakdown(results.score)
+
+
+# ============================================================
+# Per-model contribution cards
+# ============================================================
+st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+st.markdown(
+    '<div class="eq-section-label">MODEL CONTRIBUTIONS</div>',
+    unsafe_allow_html=True,
+)
+
+vc1, vc2, vc3, vc4 = st.columns(4)
+with vc1:
+    if results.dcf is not None:
+        render_valuation_card(
+            model="DCF · 3-stage",
+            intrinsic=results.dcf.intrinsic_value_per_share,
+            current_price=current_price,
+            sub_label=(f"WACC {results.dcf.wacc:.1%} · g₁ {results.dcf.stage1_growth:.1%} "
+                       f"→ g_t {results.dcf.terminal_growth:.1%}"),
+        )
+    else:
+        render_valuation_card(model="DCF · 3-stage", intrinsic=None,
+                              sub_label=results.dcf_error or "unavailable")
+
+with vc2:
+    cmp_res = results.comparables
+    if cmp_res is not None and cmp_res.implied_per_share_median is not None:
+        mults_used = ", ".join(cmp_res.multiples.keys())
+        render_valuation_card(
+            model="COMPARABLES",
+            intrinsic=cmp_res.implied_per_share_median,
+            current_price=current_price,
+            range_low=cmp_res.implied_per_share_low,
+            range_high=cmp_res.implied_per_share_high,
+            sub_label=f"{cmp_res.n_peers_input} peers · {mults_used}",
+        )
+    else:
+        render_valuation_card(model="COMPARABLES", intrinsic=None,
+                              sub_label=results.comparables_error or "no peers")
+
+with vc3:
+    if results.monte_carlo is not None:
+        mc = results.monte_carlo
+        render_valuation_card(
+            model="MONTE CARLO",
+            intrinsic=mc.median,
+            current_price=current_price,
+            range_low=mc.percentiles.get(25),
+            range_high=mc.percentiles.get(75),
+            sub_label=(f"{mc.n_simulations:,} sims · "
+                       f"P(undervalued) {mc.p_undervalued:.0%}"
+                       if mc.p_undervalued is not None
+                       else f"{mc.n_simulations:,} sims"),
+        )
+    else:
+        render_valuation_card(model="MONTE CARLO", intrinsic=None,
+                              sub_label=results.monte_carlo_error or "unavailable")
+
+with vc4:
+    if results.ddm is not None:
+        d = results.ddm
+        render_valuation_card(
+            model="DDM · 2-stage",
+            intrinsic=d.intrinsic_value_per_share,
+            current_price=current_price,
+            sub_label=(f"DPS ${d.base_dividend:.2f} · g₁ {d.stage1_growth:.1%} · "
+                       f"payout {d.payout_ratio:.0%}"
+                       if d.payout_ratio is not None
+                       else f"DPS ${d.base_dividend:.2f}"),
+        )
+    elif results.residual_income is not None:
+        ri = results.residual_income
+        render_valuation_card(
+            model="RESIDUAL INCOME",
+            intrinsic=ri.intrinsic_value_per_share,
+            current_price=current_price,
+            sub_label=(f"BV/sh ${ri.book_value_per_share:.2f} · "
+                       f"ROE {ri.base_roe:.1%}"),
+        )
+    else:
+        render_valuation_card(model="DDM / RI", intrinsic=None,
+                              sub_label="not applicable")
+
+
+# ============================================================
+# Detail tables
+# ============================================================
+st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+st.markdown(
+    '<div class="eq-section-label">FINANCIAL RATIOS</div>',
+    unsafe_allow_html=True,
+)
+show_cols = [c for c in (
+    "Gross Margin %", "Operating Margin %", "EBITDA Margin %", "Net Margin %",
+    "ROE %", "ROA %", "ROIC %",
+    "Debt/Equity", "Current Ratio",
+    "FCF Margin %", "FCF Adj Margin %", "Cash Conversion",
+) if c in ratios.columns]
+transposed = ratios[show_cols].T
+transposed.columns = [d.strftime("%Y") if hasattr(d, "strftime") else str(d)
+                      for d in transposed.columns]
+st.dataframe(transposed.round(2), use_container_width=True, height=440)
+
+
+st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+st.markdown(
+    '<div class="eq-section-label">EARNINGS QUALITY</div>',
+    unsafe_allow_html=True,
+)
+flags = [f for f in (eq.beneish, eq.piotroski, eq.sloan) if f is not None]
+if flags:
+    rows = pd.DataFrame([{
+        "Metric": f.name, "Score": f.score,
+        "Flag": f.flag.upper(), "Explanation": f.explanation,
+    } for f in flags])
+    st.dataframe(
+        rows, hide_index=True, use_container_width=True,
+        column_config={"Score": st.column_config.NumberColumn(format="%.2f")},
+    )
+
+
+# ---- DCF projection + EV split ----
+if results.dcf is not None:
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="eq-section-label">DCF — FCF PROJECTION (USD MM)</div>',
+        unsafe_allow_html=True,
+    )
+    dcf = results.dcf
+    proj = pd.DataFrame({
+        "Year":     [f"Y{i+1}" for i in range(len(dcf.projected_fcf))],
+        "Growth":   [f"{g*100:.2f}%" for g in dcf.growth_path],
+        "FCF":      [v / 1e6 for v in dcf.projected_fcf],
+        "Discount": [f"{d:.4f}" for d in dcf.discount_factors],
+        "PV":       [v / 1e6 for v in dcf.pv_per_year],
+    })
+    st.dataframe(
+        proj, hide_index=True, use_container_width=True,
+        column_config={
+            "FCF": st.column_config.NumberColumn(format="%.0f"),
+            "PV":  st.column_config.NumberColumn(format="%.0f"),
+        },
+    )
+    ev_split = pd.DataFrame([{
+        "Component": "PV of explicit FCF",
+        "USD (B)":     dcf.pv_explicit / 1e9,
+        "Share of EV": dcf.pv_explicit / dcf.enterprise_value * 100,
+    }, {
+        "Component": "PV of terminal value",
+        "USD (B)":     dcf.pv_terminal / 1e9,
+        "Share of EV": dcf.pv_terminal / dcf.enterprise_value * 100,
+    }])
+    st.dataframe(
+        ev_split, hide_index=True, use_container_width=True,
+        column_config={
+            "USD (B)":     st.column_config.NumberColumn(format="%.2f"),
+            "Share of EV": st.column_config.NumberColumn(format="%.1f%%"),
+        },
+    )
+
+    # ---- Sensitivity table ----
+    st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="eq-section-label">SENSITIVITY · INTRINSIC $/SHARE</div>',
+        unsafe_allow_html=True,
+    )
+    wacc_grid = [round(results.wacc.wacc + d, 4) for d in (-0.02, -0.01, 0.0, 0.01, 0.02)]
+    g_grid    = [round(assumptions.terminal_growth + d, 4)
+                 for d in (-0.01, -0.005, 0.0, 0.005, 0.01)]
+    g_override = assumptions.override_growth or None
+    sens = sensitivity_table(
+        income=inc, balance=bal, cash=cf,
+        wacc_grid=wacc_grid, g_grid=g_grid,
+        stage1_growth=g_override,
+    )
+    sens.index   = [f"{w:.2%}" for w in sens.index]
+    sens.columns = [f"{g:.2%}" for g in sens.columns]
+    sens.index.name = "WACC ↓ / g →"
+    st.dataframe(sens.round(2), use_container_width=True)
+
+
+# ---- Comparables breakdown ----
+if results.comparables is not None and results.comparables.multiples:
+    st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="eq-section-label">COMPARABLES BREAKDOWN</div>',
+        unsafe_allow_html=True,
+    )
+    tbl = comparables_table(results.comparables)
+    st.dataframe(
+        tbl, hide_index=True, use_container_width=True,
+        column_config={
+            "Median":          st.column_config.NumberColumn(format="%.2f"),
+            "P25":             st.column_config.NumberColumn(format="%.2f"),
+            "P75":             st.column_config.NumberColumn(format="%.2f"),
+            "Implied $/share": st.column_config.NumberColumn(format="$%.2f"),
+        },
+    )
+
+
+# ---- Monte Carlo distribution ----
+if results.monte_carlo is not None:
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="eq-section-label">MONTE CARLO · INTRINSIC VALUE DISTRIBUTION</div>',
+        unsafe_allow_html=True,
+    )
+    mc = results.monte_carlo
+    st.plotly_chart(
+        build_mc_distribution_figure(
+            mc.intrinsic_distribution,
+            percentiles=mc.percentiles,
+            current_price=current_price,
+        ),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+    mc_summary = pd.DataFrame([
+        {"Statistic": "Mean",    "Value": f"${mc.mean:,.2f}"},
+        {"Statistic": "Median",  "Value": f"${mc.median:,.2f}"},
+        {"Statistic": "Std dev", "Value": f"${mc.std:,.2f}"},
+        *[
+            {"Statistic": f"Percentile {p}", "Value": f"${v:,.2f}"}
+            for p, v in mc.percentiles.items()
+        ],
+        {"Statistic": "Sims that failed validation",
+         "Value": f"{mc.n_failed:,} / {mc.n_simulations:,}"},
+    ])
+    st.dataframe(mc_summary, hide_index=True, use_container_width=True)
+
+st.caption(
+    "Demo peer set; FMP screener replaces it once the live provider is online. "
+    "Save assumptions per-ticker via the panel above."
+)
