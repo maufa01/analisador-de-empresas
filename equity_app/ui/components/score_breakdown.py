@@ -96,7 +96,10 @@ def _bar_html(label: str, value: Optional[float], explanation: Optional[str]) ->
 
 
 def render_score_breakdown(score: ScoreBreakdown) -> None:
-    """5 horizontal bars (Growth · Profitability · Solvency · EQ · Valuation)."""
+    """
+    Original 5-bar layout — kept for backwards compat. New code should
+    prefer ``render_score_breakdown_grid`` (Bloomberg-style 5-card row).
+    """
     rows = [
         ("Growth",           score.growth,           score.explanations.get("growth")),
         ("Profitability",    score.profitability,    score.explanations.get("profitability")),
@@ -110,3 +113,72 @@ def render_score_breakdown(score: ScoreBreakdown) -> None:
         f'<div class="eq-card" style="padding:18px;">{body}</div>',
         unsafe_allow_html=True,
     )
+
+
+# ============================================================
+# Bloomberg-style 5-card grid (default for the Overview tab)
+# ============================================================
+def _grid_color(score_value: Optional[float]) -> str:
+    """Score → color band per the spec (red / orange / gold / green)."""
+    if score_value is None:
+        return "var(--text-muted)"
+    if score_value >= 75: return "var(--gains)"
+    if score_value >= 50: return "var(--accent)"
+    if score_value >= 25: return "#D97706"           # warm amber for the 25-50 band
+    return "var(--losses)"
+
+
+def _card_html(label: str, value: Optional[float], explanation: Optional[str]) -> str:
+    if value is None:
+        disp = "—"
+        pct = 0
+        color = "var(--text-muted)"
+    else:
+        disp = f"{value:.0f}"
+        pct = max(0, min(100, int(value)))
+        color = _grid_color(value)
+
+    expl_html = (
+        f'<div style="color:var(--text-muted); font-size:11px; margin-top:8px; '
+        f'line-height:1.4; min-height:30px;">{explanation}</div>'
+        if explanation else
+        '<div style="margin-top:8px; min-height:30px;"></div>'
+    )
+
+    return (
+        '<div style="background:var(--surface); border:1px solid var(--border); '
+        'border-radius:8px; padding:14px 16px; min-height:140px;">'
+        f'<div style="font-size:32px; font-weight:500; letter-spacing:-0.5px; '
+        f'color:{color}; font-variant-numeric:tabular-nums; line-height:1.1;">{disp}</div>'
+        f'<div class="eq-idx-label" style="margin-top:4px;">{label.upper()}</div>'
+        f'<div style="background:var(--surface-raised); height:2px; '
+        f'border-radius:1px; margin-top:10px; overflow:hidden;">'
+        f'<div style="background:{color}; width:{pct}%; height:100%;"></div>'
+        f'</div>'
+        f'{expl_html}'
+        '</div>'
+    )
+
+
+def render_score_breakdown_grid(score: ScoreBreakdown) -> None:
+    """
+    5-card grid: each component as a separate card with the score in big
+    tabular numerals, a 2px coloured bar, and the driver caption below.
+
+    Each st.column gets one independent st.markdown (one-line HTML), so the
+    indented-code-block trap doesn't apply.
+    """
+    items = [
+        ("Growth",           score.growth,           score.explanations.get("growth")),
+        ("Profitability",    score.profitability,    score.explanations.get("profitability")),
+        ("Solvency",         score.solvency,         score.explanations.get("solvency")),
+        ("Earnings quality", score.earnings_quality, score.explanations.get("earnings_quality")),
+        ("Valuation",        score.valuation,        score.explanations.get("valuation")),
+    ]
+    cols = st.columns(len(items))
+    for col, (label, value, explanation) in zip(cols, items):
+        with col:
+            st.markdown(
+                _card_html(label, value, explanation),
+                unsafe_allow_html=True,
+            )

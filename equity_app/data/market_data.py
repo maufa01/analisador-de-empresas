@@ -163,6 +163,14 @@ def get_index_history(symbol: str, period: str = "1y") -> pd.DataFrame:
     return df
 
 
+# Single-ticker price history — used by the Overview tab's price chart
+# and returns table on the Equity Analysis page.
+@st.cache_data(ttl=300, show_spinner=False)
+def get_ticker_history(ticker: str, period: str = "5y") -> pd.DataFrame:
+    """Daily OHLCV for a single ticker. Empty DataFrame on failure."""
+    return get_index_history(ticker, period=period)
+
+
 # Backward-compatible alias used by older pages
 @st.cache_data(ttl=300, show_spinner=False)
 def get_spx_history(period: str = "1y") -> pd.DataFrame:

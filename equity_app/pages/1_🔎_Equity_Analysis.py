@@ -304,20 +304,137 @@ tab_overview, tab_valuation, tab_financials, tab_quality, tab_peers, tab_charts 
 
 # ---- Overview ----
 with tab_overview:
+    # ---- 1. Returns row (vs S&P 500 benchmark) ----
+    from data.market_data import get_ticker_history
+    from ui.components.returns_table import (
+        compute_returns, render_returns_row,
+        render_benchmark_comparison, render_benchmark_row,
+    )
+    from ui.components.price_with_intrinsic_chart import (
+        build_price_with_intrinsic_figure,
+    )
+    from ui.components.football_field import build_football_field_figure
+    from ui.components.score_breakdown import render_score_breakdown_grid
+    from ui.components.dupont_card import render_dupont_card
+    from ui.components.peer_comparison_quick import render_peer_comparison_quick
+
+    st.markdown(
+        '<div class="eq-section-label">RETURNS</div>',
+        unsafe_allow_html=True,
+    )
+    overview_period = st.session_state.get("overview_chart_period", "5y")
+    price_history = get_ticker_history(active_ticker, period="10y")
+    spx_history = get_ticker_history("^GSPC", period="10y")
+
+    target_close = (price_history["Close"].dropna()
+                    if not price_history.empty and "Close" in price_history.columns
+                    else None)
+    spx_close = (spx_history["Close"].dropna()
+                 if not spx_history.empty and "Close" in spx_history.columns
+                 else None)
+
+    target_returns = compute_returns(target_close) if target_close is not None else {}
+    spx_returns = compute_returns(spx_close) if spx_close is not None else {}
+    render_returns_row(target_returns)
+
+    if target_returns and spx_returns:
+        comparisons = []
+        for label in ("1Y", "3Y", "5Y"):
+            comparisons.append(render_benchmark_comparison(
+                target=target_returns.get(label),
+                benchmark=spx_returns.get(label),
+                label=f"S&P 500 ({label})",
+            ))
+        render_benchmark_row(comparisons)
+
+    # ---- 2. Price chart with intrinsic overlays ----
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+    pc_l, pc_r = st.columns([4, 1])
+    with pc_l:
+        st.markdown(
+            '<div class="eq-section-label">PRICE · INTRINSIC OVERLAYS</div>',
+            unsafe_allow_html=True,
+        )
+    with pc_r:
+        period_label = st.radio(
+            "price_period",
+            options=["1Y", "3Y", "5Y", "10Y"],
+            index=2, horizontal=True, label_visibility="collapsed",
+            key=f"price_period_{active_ticker}",
+        )
+    period_key = {"1Y": "1y", "3Y": "3y", "5Y": "5y", "10Y": "10y"}[period_label]
+
+    chart_history = get_ticker_history(active_ticker, period=period_key)
+    if chart_history.empty:
+        st.info("No price history available for this ticker (yfinance returned empty).")
+    else:
+        st.plotly_chart(
+            build_price_with_intrinsic_figure(chart_history, results, height=400),
+            use_container_width=True, config={"displayModeBar": False},
+        )
+
+    # ---- 3. Football field — valuation ranges ----
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="eq-section-label">FOOTBALL FIELD · MODEL RANGES</div>',
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(
+        build_football_field_figure(
+            results,
+            week52_low=w52[0] if w52 else None,
+            week52_high=w52[1] if w52 else None,
+            height=360,
+        ),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+
+    # ---- 4. Score breakdown (Bloomberg-style 5-card grid) ----
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+    composite = results.score.composite if results.score else 0.0
+    st.markdown(
+        f'<div class="eq-section-label">SCORE BREAKDOWN  ·  '
+        f'<span style="color:var(--text-primary);">{composite:.0f}/100</span></div>',
+        unsafe_allow_html=True,
+    )
+    render_score_breakdown_grid(results.score)
+
+    # ---- 5. Valuation summary table (the per-model breakdown) ----
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
     st.markdown(
         '<div class="eq-section-label">VALUATION SUMMARY</div>',
         unsafe_allow_html=True,
     )
     render_valuation_summary(results)
 
-    st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+    # ---- 6. DuPont decomposition ----
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+    render_dupont_card(inc, bal)
+
+    # ---- 7. Quick peer comparison ----
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
     st.markdown(
-        '<div class="eq-section-label">SCORE BREAKDOWN</div>',
+        '<div class="eq-section-label">QUICK PEER COMPARISON</div>',
         unsafe_allow_html=True,
     )
-    render_score_breakdown(results.score)
+    if peers_demo:
+        render_peer_comparison_quick(
+            target_ticker=active_ticker,
+            target_income=inc, target_balance=bal,
+            target_market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+            target_enterprise_value=(
+                (_DEMO_MARKET_CAP.get(active_ticker, 0)
+                 + (float(bal["totalDebt"].iloc[-1]) if "totalDebt" in bal.columns else 0))
+                if active_ticker in _DEMO_MARKET_CAP else None
+            ),
+            peers=peers_demo,
+        )
+        st.caption("Best metric per row in green, worst in red. See the **Peers** tab for the full multiples breakdown.")
+    else:
+        st.info("No peers configured for this ticker.")
 
-    st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+    # ---- 8. Revenue / Net Income / FCF chart (kept) ----
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
     st.markdown(
         '<div class="eq-section-label">REVENUE · NET INCOME · FREE CASH FLOW</div>',
         unsafe_allow_html=True,
@@ -325,6 +442,13 @@ with tab_overview:
     st.plotly_chart(
         build_revenue_figure(inc, cash=cf, height=300),
         use_container_width=True, config={"displayModeBar": False},
+    )
+
+    st.caption(
+        "Sections still pending live-data wiring: segments / geography, "
+        "analyst ratings, institutional holders, news + sentiment, "
+        "short interest, events timeline. They land when the FMP / "
+        "EDGAR / news endpoints come online."
     )
 
 

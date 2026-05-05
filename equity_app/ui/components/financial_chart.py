@@ -59,7 +59,8 @@ def build_income_chart(income: pd.DataFrame, *, height: int = 220) -> go.Figure:
 
     fig.add_trace(go.Bar(
         x=x_labels, y=rev_b.values,
-        name="Revenue", marker=dict(color=ACCENT),
+        name="Revenue",
+        marker=dict(color="rgba(201,169,97,0.45)"),     # softer so margin line stays prominent
         hovertemplate="<b>%{x}</b><br>Revenue $%{y:,.2f}B<extra></extra>",
     ))
     if ni is not None and not ni.dropna().empty:
@@ -77,7 +78,7 @@ def build_income_chart(income: pd.DataFrame, *, height: int = 220) -> go.Figure:
 
     fig.update_layout(
         height=height, **_BASE_LAYOUT,
-        xaxis=dict(color=TEXT_MUTED, showgrid=False, zeroline=False),
+        xaxis=dict(color=TEXT_MUTED, showgrid=False, zeroline=False, type="category"),
         yaxis=dict(
             title=dict(text="Revenue ($B)", font=dict(color=TEXT_MUTED)),
             color=TEXT_MUTED, showgrid=True, gridcolor=BORDER,
@@ -128,7 +129,7 @@ def build_balance_chart(balance: pd.DataFrame, *, height: int = 220) -> go.Figur
     fig.update_layout(
         height=height, **_BASE_LAYOUT,
         barmode="stack",
-        xaxis=dict(color=TEXT_MUTED, showgrid=False, zeroline=False),
+        xaxis=dict(color=TEXT_MUTED, showgrid=False, zeroline=False, type="category"),
         yaxis=dict(
             title=dict(text="USD ($B)", font=dict(color=TEXT_MUTED)),
             color=TEXT_MUTED, showgrid=True, gridcolor=BORDER,
@@ -183,7 +184,7 @@ def build_fcf_chart(
 
     fig.update_layout(
         height=height, **_BASE_LAYOUT,
-        xaxis=dict(color=TEXT_MUTED, showgrid=False, zeroline=False),
+        xaxis=dict(color=TEXT_MUTED, showgrid=False, zeroline=False, type="category"),
         yaxis=dict(
             title=dict(text="FCF ($B)", font=dict(color=TEXT_MUTED)),
             color=TEXT_MUTED, showgrid=True, gridcolor=BORDER,

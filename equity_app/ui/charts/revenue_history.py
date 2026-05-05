@@ -51,7 +51,8 @@ def build_revenue_figure(
     fig.add_trace(go.Bar(
         x=x_labels, y=rev_b.values,
         name="Revenue",
-        marker=dict(color=ACCENT, line=dict(color=BORDER, width=0)),
+        # Lowered opacity so the Net Income / FCF lines stay readable on top
+        marker=dict(color="rgba(201,169,97,0.45)", line=dict(color=BORDER, width=0)),
         hovertemplate="<b>%{x}</b><br>Revenue $%{y:,.2f}B<extra></extra>",
     ))
 
@@ -88,7 +89,9 @@ def build_revenue_figure(
                     xanchor="right", x=1, bgcolor="rgba(0,0,0,0)"),
         hoverlabel=dict(bgcolor=SURFACE, bordercolor=BORDER,
                         font=dict(color=TEXT_PRIMARY, size=12)),
-        xaxis=dict(color=TEXT_MUTED, showgrid=False, zeroline=False),
+        # type="category" forces years to be discrete so Plotly stops
+        # interpolating "2020.5" between integer-like x labels.
+        xaxis=dict(color=TEXT_MUTED, showgrid=False, zeroline=False, type="category"),
         yaxis=dict(color=TEXT_MUTED, showgrid=True, gridcolor=BORDER,
                    zeroline=False, ticksuffix="B", tickprefix="$"),
         bargap=0.35,
