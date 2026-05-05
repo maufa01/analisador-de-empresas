@@ -363,14 +363,39 @@ render_quick_metrics(
 
 
 # ============================================================
+# 3.5 — Peer-relative ranking
+# ============================================================
+from analysis.peer_ranking import compute_peer_rankings
+from ui.components.peer_ranking_table import render_peer_ranking
+
+st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+if peers_demo:
+    market_cap_pr = _DEMO_MARKET_CAP.get(active_ticker)
+    enterprise_value_pr = None
+    if market_cap_pr is not None and "totalDebt" in bal.columns:
+        try:
+            enterprise_value_pr = market_cap_pr + float(bal["totalDebt"].iloc[-1])
+        except Exception:
+            enterprise_value_pr = None
+    ranking = compute_peer_rankings(
+        target_ticker=active_ticker,
+        target_income=inc, target_balance=bal, target_cash=cf,
+        target_market_cap=market_cap_pr,
+        target_enterprise_value=enterprise_value_pr,
+        peers=peers_demo,
+    )
+    render_peer_ranking(ranking)
+
+
+# ============================================================
 # 4 — Tabs
 # ============================================================
 st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
 (tab_overview, tab_valuation, tab_financials, tab_ratios,
- tab_quality, tab_peers, tab_charts) = st.tabs([
+ tab_quality, tab_peers, tab_capital, tab_charts) = st.tabs([
     "Overview", "Valuation", "Financials", "Ratios",
-    "Quality", "Peers", "Charts",
+    "Quality", "Peers", "Capital allocation", "Charts",
 ])
 
 
@@ -662,8 +687,37 @@ with tab_valuation:
             },
         )
 
-    # Sensitivity heatmap
+    # Reverse DCF — what growth justifies the current price?
+    if current_price and current_price > 0 and results.dcf is not None:
+        from valuation.reverse_dcf import run_reverse_dcf
+        from ui.components.reverse_dcf_section import render_reverse_dcf_section
+        from analysis.damodaran_loader import get_industry_benchmarks
+
+        st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+        st.markdown(
+            '<div class="eq-section-label">REVERSE DCF · MARKET-IMPLIED GROWTH</div>',
+            unsafe_allow_html=True,
+        )
+        bench = get_industry_benchmarks(
+            (TICKER_META.get(active_ticker, {}) or {}).get("sector"),
+            sector=sector,
+        )
+        industry_growth = (bench.get("growth") / 100.0
+                           if bench.get("growth") is not None else None)
+        rev_result = run_reverse_dcf(
+            income=inc, balance=bal, cash=cf,
+            target_price=float(current_price),
+            wacc=results.wacc.wacc,
+            terminal_growth=current_assumptions.terminal_growth,
+            stage1_years=current_assumptions.stage1_years,
+            stage2_years=current_assumptions.stage2_years,
+            industry_growth=industry_growth,
+        )
+        render_reverse_dcf_section(rev_result)
+
+    # Sensitivity heatmap (now Plotly with current-scenario star)
     if results.dcf is not None:
+        from ui.charts.sensitivity_heatmap import build_sensitivity_heatmap
         st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
         st.markdown(
             '<div class="eq-section-label">SENSITIVITY · INTRINSIC $/SHARE</div>',
@@ -679,10 +733,16 @@ with tab_valuation:
             wacc_grid=wacc_grid, g_grid=g_grid,
             stage1_growth=g_override,
         )
-        sens.index = [f"{w_:.2%}" for w_ in sens.index]
-        sens.columns = [f"{g:.2%}" for g in sens.columns]
-        sens.index.name = "WACC ↓ / g →"
-        st.dataframe(sens.round(2), use_container_width=True)
+        st.plotly_chart(
+            build_sensitivity_heatmap(
+                sens,
+                current_price=current_price,
+                current_wacc=results.wacc.wacc,
+                current_g=current_assumptions.terminal_growth,
+                height=380,
+            ),
+            use_container_width=True, config={"displayModeBar": False},
+        )
 
     # Monte Carlo distribution
     if results.monte_carlo is not None:
@@ -874,6 +934,19 @@ with tab_peers:
     else:
         st.info(results.comparables_error
                 or "No comparable peers configured for this ticker.")
+
+
+# ---- Capital allocation ----
+with tab_capital:
+    from analysis.capital_allocation import analyze_capital_allocation
+    from ui.components.capital_allocation_dashboard import (
+        render_capital_allocation_dashboard,
+    )
+    capital_result = analyze_capital_allocation(
+        income=inc, balance=bal, cash=cf,
+        market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+    )
+    render_capital_allocation_dashboard(capital_result)
 
 
 # ---- Charts ----
