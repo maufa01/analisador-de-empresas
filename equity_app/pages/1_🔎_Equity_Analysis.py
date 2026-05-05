@@ -24,6 +24,7 @@ from core.exceptions import ValuationError, InsufficientDataError
 from analysis.ratios import calculate_ratios
 from analysis.earnings_quality import assess_earnings_quality
 from analysis.wacc import calculate_wacc
+from data.ticker_universe import SP500_TOP, labels as ticker_labels, ticker_from_label
 from valuation.dcf_three_stage import run_dcf, sensitivity_table
 from valuation.comparables import (
     PeerSnapshot, TargetFundamentals,
@@ -107,7 +108,7 @@ def _wacc_sidebar() -> dict:
             unsafe_allow_html=True,
         )
         params["projection_years"] = st.number_input(
-            "Years", value=DCF_DEFAULTS["projection_years"],
+            "Years", value=int(DCF_DEFAULTS["stage1_years"]),
             min_value=3, max_value=10, step=1,
             help="Number of explicit projection years before terminal value.",
         )
@@ -144,18 +145,46 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-ic1, ic2, ic3 = st.columns([1.2, 3, 1])
+# ---- Ticker search ("la lupa") ----
+# st.selectbox is type-searchable out of the box: typing "App" filters to
+# AAPL · Apple Inc. The custom-ticker toggle below lets a user enter
+# anything outside the curated S&P 500 universe.
+_LABELS: list[str] = ticker_labels(SP500_TOP)
+
+ic1, ic2, ic3, ic4 = st.columns([1.5, 2.4, 1.0, 1.1])
 with ic1:
-    ticker = st.text_input(
-        "Ticker", value="AAPL", label_visibility="collapsed",
-        placeholder="TICKER",
-    ).strip().upper()
+    use_custom = st.toggle(
+        "Custom",
+        value=False,
+        help="Toggle to type a ticker outside the curated list "
+             "(e.g. an international ADR or small-cap).",
+    )
 with ic2:
+    if use_custom:
+        ticker = st.text_input(
+            "Ticker", value="AAPL", label_visibility="collapsed",
+            placeholder="TYPE A TICKER",
+        ).strip().upper()
+    else:
+        default_idx = next(
+            (i for i, lbl in enumerate(_LABELS)
+             if lbl.startswith("AAPL ")),
+            0,
+        )
+        chosen_label = st.selectbox(
+            "Ticker",
+            options=_LABELS,
+            index=default_idx,
+            label_visibility="collapsed",
+            placeholder="🔎 Search ticker or company…",
+        )
+        ticker = ticker_from_label(chosen_label)
+with ic3:
     peers = st.text_input(
         "Peers", value="MSFT,GOOGL,META", label_visibility="collapsed",
-        placeholder="PEERS (comma-separated)",
+        placeholder="PEERS",
     )
-with ic3:
+with ic4:
     analyze = st.button("Analyze", use_container_width=True)
 
 
