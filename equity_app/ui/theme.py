@@ -203,6 +203,22 @@ h1, h2, h3, h4, h5 {{
     align-items: center;
 }}
 
+/* st.radio — Streamlit's default primary is a coral that clashes with the
+   gold accent. Force the active dot to brand gold. The selectors below
+   cover BaseWeb's nested div structure and the older marker pattern. */
+[data-baseweb="radio"] [data-baseweb="checkbox"] [aria-checked="true"],
+div[role="radiogroup"] label[data-baseweb="radio"] input[type="radio"]:checked + div {{
+    background-color: var(--accent) !important;
+    border-color: var(--accent) !important;
+}}
+[data-baseweb="radio"] svg {{
+    fill: var(--accent) !important;
+}}
+/* The little circle marker at the centre of the dot */
+div[role="radiogroup"] label[data-baseweb="radio"] input[type="radio"]:checked + div > div {{
+    background-color: var(--bg-primary) !important;
+}}
+
 /* Sidebar inputs (when expanded) */
 section[data-testid="stSidebar"] {{
     background-color: var(--surface) !important;

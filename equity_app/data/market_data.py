@@ -163,6 +163,31 @@ def get_index_history(symbol: str, period: str = "1y") -> pd.DataFrame:
     return df
 
 
+# ============================================================
+# Yields curve, commodities/FX, pre-market futures
+# ============================================================
+YIELD_TENORS: dict[str, str] = {
+    "3M":  "^IRX",      # quoted as % directly (×100 of the actual rate)
+    "5Y":  "^FVX",      # same convention as ^TNX (× 10 of the rate)
+    "10Y": "^TNX",
+    "30Y": "^TYX",
+}
+
+COMMODITY_SYMBOLS: dict[str, str] = {
+    "Gold":     "GC=F",
+    "WTI Oil":  "CL=F",
+    "NatGas":   "NG=F",
+    "DXY":      "DX-Y.NYB",
+    "Bitcoin":  "BTC-USD",
+}
+
+FUTURES_SYMBOLS: dict[str, str] = {
+    "S&P":    "ES=F",
+    "Nasdaq": "NQ=F",
+    "Dow":    "YM=F",
+}
+
+
 # Multi-symbol last/change snapshot — used by the market-pulse strip on
 # the Equity Analysis landing (S&P 500, Nasdaq, VIX, 10Y, Gold, BTC, …).
 @st.cache_data(ttl=60, show_spinner=False)
@@ -215,6 +240,207 @@ def get_pulse_quotes(symbols: tuple[str, ...]) -> dict[str, dict]:
         except Exception:
             continue
 
+    return out
+
+
+# ============================================================
+# Yields strip — adjusts ^IRX/^FVX/^TNX/^TYX into actual percentages
+# ============================================================
+@st.cache_data(ttl=120, show_spinner=False)
+def get_yields() -> dict[str, dict]:
+    """
+    Returns ``{tenor: {last_pct, change_bps_5d}}``. ``^TNX/^FVX/^TYX``
+    are quoted by Yahoo as the percentage × 10 (so ^TNX = 44.5 means
+    4.45%); ^IRX is already in percent.
+    """
+    quotes = get_pulse_quotes(tuple(YIELD_TENORS.values()))
+    out: dict[str, dict] = {}
+    for tenor, sym in YIELD_TENORS.items():
+        q = quotes.get(sym, {})
+        last = q.get("last")
+        prev = (last - q["change_abs"]) if (last is not None
+                                            and q.get("change_abs") is not None) else None
+        if last is None:
+            out[tenor] = {"last_pct": None, "change_bps_5d": None}
+            continue
+        # ^IRX is already in % units; the others are × 10 of the rate
+        scale = 1.0 if sym == "^IRX" else 0.1
+        last_pct = last * scale
+        change_bps = ((last - prev) * scale * 100.0) if prev is not None else None
+        out[tenor] = {"last_pct": last_pct, "change_bps_5d": change_bps}
+    return out
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_commodities() -> dict[str, dict]:
+    """``{label: {last, change_pct}}`` for gold / oil / gas / DXY / BTC."""
+    quotes = get_pulse_quotes(tuple(COMMODITY_SYMBOLS.values()))
+    return {
+        label: {
+            "last":       quotes.get(sym, {}).get("last"),
+            "change_pct": quotes.get(sym, {}).get("change_pct"),
+        }
+        for label, sym in COMMODITY_SYMBOLS.items()
+    }
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_premarket_futures() -> dict[str, dict]:
+    """``{label: {last, change_pct}}`` for ES / NQ / YM. yfinance returns
+    last-close-vs-prior-close out-of-hours, which is a good proxy for
+    overnight session direction."""
+    quotes = get_pulse_quotes(tuple(FUTURES_SYMBOLS.values()))
+    return {
+        label: {
+            "last":       quotes.get(sym, {}).get("last"),
+            "change_pct": quotes.get(sym, {}).get("change_pct"),
+        }
+        for label, sym in FUTURES_SYMBOLS.items()
+    }
+
+
+# ============================================================
+# Market breadth — derived from the cached movers panel so we don't
+# hit yfinance again. Uses the curated 119-ticker S&P universe.
+# ============================================================
+@st.cache_data(ttl=300, show_spinner=False)
+def get_market_breadth() -> dict[str, float]:
+    """
+    Compute breadth metrics over the curated S&P 500 universe:
+
+        advancing / declining
+        pct_above_50ma
+        new_52w_highs / new_52w_lows
+        mcclellan_proxy: simple (advancers − decliners) ratio scaled
+            (the real McClellan needs a 19/39d EMA which we approximate)
+
+    Returns a dict with whatever values could be computed; missing
+    metrics come back as None.
+    """
+    from data.constituents import SP500
+    panel = _fetch_movers_panel(tuple(sorted(SP500)))
+    if panel is None or panel.empty:
+        return {
+            "advancing": None, "declining": None,
+            "pct_above_50ma": None,
+            "new_52w_highs": None, "new_52w_lows": None,
+            "mcclellan_proxy": None,
+        }
+
+    yf = _yfinance()
+    if yf is None:
+        return {"advancing": None, "declining": None,
+                "pct_above_50ma": None, "new_52w_highs": None,
+                "new_52w_lows": None, "mcclellan_proxy": None}
+
+    advancing = int((panel["change_pct"] > 0).sum())
+    declining = int((panel["change_pct"] < 0).sum())
+    n_total = len(panel)
+
+    # 50-day MA + 52w highs/lows need historical prices — pull a 1y panel.
+    try:
+        hist = yf.download(
+            list(SP500), period="1y", interval="1d",
+            auto_adjust=False, progress=False,
+            group_by="ticker", threads=True,
+        )
+    except Exception as e:
+        log.warning("yf_breadth_failed", error=str(e))
+        return {
+            "advancing": advancing, "declining": declining,
+            "pct_above_50ma": None, "new_52w_highs": None,
+            "new_52w_lows": None, "mcclellan_proxy": None,
+        }
+
+    if hist is None or hist.empty or not isinstance(hist.columns, pd.MultiIndex):
+        return {
+            "advancing": advancing, "declining": declining,
+            "pct_above_50ma": None, "new_52w_highs": None,
+            "new_52w_lows": None, "mcclellan_proxy": None,
+        }
+
+    above_50ma = 0
+    new_highs = 0
+    new_lows = 0
+    counted = 0
+    for tk in SP500:
+        try:
+            close = hist[(tk, "Close")].dropna()
+            if len(close) < 50:
+                continue
+            counted += 1
+            ma50 = close.tail(50).mean()
+            last = float(close.iloc[-1])
+            if last > ma50:
+                above_50ma += 1
+            window_high = float(close.tail(252).max())
+            window_low = float(close.tail(252).min())
+            # "New high/low" if last close is within 0.5% of the 52w extreme
+            if last >= window_high * 0.995:
+                new_highs += 1
+            if last <= window_low * 1.005:
+                new_lows += 1
+        except Exception:
+            continue
+
+    pct_above = (above_50ma / counted * 100.0) if counted else None
+    # Crude McClellan proxy = (advancers − decliners) / total × 100
+    mcc = (advancing - declining) / n_total * 100.0 if n_total else None
+
+    return {
+        "advancing":       float(advancing),
+        "declining":       float(declining),
+        "pct_above_50ma":  pct_above,
+        "new_52w_highs":   float(new_highs),
+        "new_52w_lows":    float(new_lows),
+        "mcclellan_proxy": mcc,
+    }
+
+
+# ============================================================
+# Sparkline panel — last N days of close per ticker
+# ============================================================
+@st.cache_data(ttl=300, show_spinner=False)
+def get_sparkline_panel(
+    tickers: tuple[str, ...], *, days: int = 30,
+) -> dict[str, list[float]]:
+    """
+    Returns ``{ticker: [close_t0, close_t1, ..., close_tN]}`` for the
+    last ``days`` calendar days. Empty list when yfinance can't resolve
+    a ticker. Used by movers_table's LineChartColumn.
+    """
+    panel = _fetch_movers_panel(tuple(sorted(set(tickers))))
+    if panel is None or panel.empty:
+        return {t: [] for t in tickers}
+
+    yf = _yfinance()
+    if yf is None:
+        return {t: [] for t in tickers}
+
+    try:
+        hist = yf.download(
+            list(tickers), period=f"{max(days, 30)}d", interval="1d",
+            auto_adjust=False, progress=False,
+            group_by="ticker", threads=True,
+        )
+    except Exception:
+        return {t: [] for t in tickers}
+
+    out: dict[str, list[float]] = {}
+    if hist is None or hist.empty:
+        return {t: [] for t in tickers}
+    for t in tickers:
+        try:
+            if isinstance(hist.columns, pd.MultiIndex):
+                if t not in hist.columns.get_level_values(0):
+                    out[t] = []
+                    continue
+                series = hist[(t, "Close")].dropna()
+            else:
+                series = hist["Close"].dropna()
+            out[t] = [float(v) for v in series.tail(days).values]
+        except Exception:
+            out[t] = []
     return out
 
 
