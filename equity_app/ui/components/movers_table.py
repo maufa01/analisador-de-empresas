@@ -68,9 +68,12 @@ def render_movers(
             return f"color: {LOSSES};"
         return ""
 
-    styled = display[cols_order].style.applymap(
-        _color_change, subset=["change_pct"] if "change_pct" in cols_order else []
-    )
+    # ``Styler.applymap`` was removed in pandas 2.2 — use ``Styler.map``
+    # when available and fall back to applymap on older versions.
+    subset = ["change_pct"] if "change_pct" in cols_order else []
+    styler = display[cols_order].style
+    apply_fn = getattr(styler, "map", None) or styler.applymap
+    styled = apply_fn(_color_change, subset=subset)
 
     st.dataframe(
         styled,
