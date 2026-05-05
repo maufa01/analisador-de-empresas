@@ -317,9 +317,31 @@ render_ticker_header(
 
 
 # ============================================================
+# 2.5 — Company profile + Competitive landscape
+# ============================================================
+from ui.components.company_profile import render_company_profile
+from ui.components.competitive_landscape import render_competitive_landscape
+
+st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+render_company_profile(active_ticker)
+
+st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+st.markdown(
+    '<div class="eq-section-label">COMPETITIVE LANDSCAPE</div>',
+    unsafe_allow_html=True,
+)
+render_competitive_landscape(
+    target_ticker=active_ticker,
+    target_income=inc, target_balance=bal,
+    target_market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+    peers=peers_demo,
+)
+
+
+# ============================================================
 # 3 — Quick metrics row (native st.metric — no HTML escape bug)
 # ============================================================
-st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
 last = ratios.iloc[-1]
 rev = float(last["Revenue"]) if "Revenue" in last else None
@@ -345,9 +367,11 @@ render_quick_metrics(
 # ============================================================
 st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
-tab_overview, tab_valuation, tab_financials, tab_quality, tab_peers, tab_charts = (
-    st.tabs(["Overview", "Valuation", "Financials", "Quality", "Peers", "Charts"])
-)
+(tab_overview, tab_valuation, tab_financials, tab_ratios,
+ tab_quality, tab_peers, tab_charts) = st.tabs([
+    "Overview", "Valuation", "Financials", "Ratios",
+    "Quality", "Peers", "Charts",
+])
 
 
 # ---- Overview ----
@@ -765,6 +789,26 @@ with tab_financials:
     transposed.columns = [d.strftime("%Y") if hasattr(d, "strftime") else str(d)
                           for d in transposed.columns]
     st.dataframe(transposed.round(2), use_container_width=True, height=440)
+
+
+# ---- Ratios ----
+with tab_ratios:
+    from ui.components.ratios_grid import render_ratios_grid
+    market_cap = _DEMO_MARKET_CAP.get(active_ticker)
+    enterprise_value = None
+    if market_cap is not None and "totalDebt" in bal.columns:
+        try:
+            enterprise_value = market_cap + float(bal["totalDebt"].iloc[-1])
+        except Exception:
+            enterprise_value = None
+    render_ratios_grid(
+        income=inc, balance=bal, cash=cf,
+        ratios=ratios,
+        sector=sector_label,
+        current_price=current_price,
+        market_cap=market_cap,
+        enterprise_value=enterprise_value,
+    )
 
 
 # ---- Quality ----
