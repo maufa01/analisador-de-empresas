@@ -219,6 +219,38 @@ div[role="radiogroup"] label[data-baseweb="radio"] input[type="radio"]:checked +
     background-color: var(--bg-primary) !important;
 }}
 
+/* st.slider — Streamlit's default thumb + filled track ship in coral red.
+   Force the brand gold so sliders match the radios + buttons. Selectors
+   cover BaseWeb's nested DOM (slider thumb, filled track, range track on
+   double-handle sliders) and the inner tick mark / progress fill. */
+.stSlider [data-baseweb="slider"] [role="slider"],
+.stSlider [data-baseweb="slider"] [role="slider"] > div,
+.stSlider [data-baseweb="slider"] div[role="slider"] {{
+    background-color: var(--accent) !important;
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 1px var(--accent) !important;
+}}
+/* Filled portion of the track */
+.stSlider [data-baseweb="slider"] > div:nth-child(2) > div:nth-child(1),
+.stSlider [data-baseweb="slider"] > div:nth-child(2) > div:nth-child(2) {{
+    background-color: var(--accent) !important;
+}}
+/* Inactive track */
+.stSlider [data-baseweb="slider"] > div:nth-child(1),
+.stSlider [data-baseweb="slider"] > div:nth-child(3) {{
+    background-color: var(--border) !important;
+}}
+/* Streamlit also paints a min/max value bubble in coral above the thumb */
+.stSlider [data-testid="stTickBarMin"],
+.stSlider [data-testid="stTickBarMax"],
+.stSlider [data-testid="stThumbValue"] {{
+    color: var(--text-muted) !important;
+}}
+.stSlider [data-testid="stThumbValue"] {{
+    color: var(--accent) !important;
+    font-variant-numeric: tabular-nums;
+}}
+
 /* Sidebar inputs (when expanded) */
 section[data-testid="stSidebar"] {{
     background-color: var(--surface) !important;

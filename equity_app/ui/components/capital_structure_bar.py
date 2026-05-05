@@ -37,24 +37,19 @@ def render_capital_structure_bar(
     eq_label = f"E {eq_pct:.1f}%" if eq_pct >= 8 else ""
     dt_label = f"D {dt_pct:.1f}%" if dt_pct >= 8 else ""
 
-    html = f"""
-    <div style="display: flex; width: 100%; height: {height}px;
-                border-radius: 6px; overflow: hidden;
-                border: 1px solid var(--border); margin-top: 6px;">
-        <div style="flex: {we}; background: var(--accent);
-                    display: flex; align-items: center; justify-content: center;
-                    font-size: 11px; font-weight: 500; letter-spacing: 0.4px;
-                    color: var(--bg-primary);
-                    font-variant-numeric: tabular-nums;">
-            {eq_label}
-        </div>
-        <div style="flex: {wd}; background: var(--text-muted);
-                    display: flex; align-items: center; justify-content: center;
-                    font-size: 11px; font-weight: 500; letter-spacing: 0.4px;
-                    color: var(--bg-primary);
-                    font-variant-numeric: tabular-nums;">
-            {dt_label}
-        </div>
-    </div>
-    """
+    # Single-line HTML — multi-line indented strings hit the markdown
+    # 4-space code-block trap and render the closing </div> literally.
+    seg_style = (
+        "display:flex; align-items:center; justify-content:center; "
+        "font-size:11px; font-weight:500; letter-spacing:0.4px; "
+        "color:var(--bg-primary); font-variant-numeric:tabular-nums;"
+    )
+    html = (
+        f'<div style="display:flex; width:100%; height:{height}px; '
+        'border-radius:6px; overflow:hidden; '
+        'border:1px solid var(--border); margin-top:6px;">'
+        f'<div style="flex:{we}; background:var(--accent); {seg_style}">{eq_label}</div>'
+        f'<div style="flex:{wd}; background:var(--text-muted); {seg_style}">{dt_label}</div>'
+        '</div>'
+    )
     st.markdown(html, unsafe_allow_html=True)
