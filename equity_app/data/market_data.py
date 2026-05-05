@@ -19,12 +19,32 @@ from core.logging import get_logger
 log = get_logger(__name__)
 
 
-# Display label → yfinance ticker
+# Display label → yfinance ticker (kept for backwards compatibility)
 INDEX_TICKERS: dict[str, str] = {
     "S&P 500":   "^GSPC",
     "NASDAQ":    "^IXIC",
     "DOW JONES": "^DJI",
     "VIX":       "^VIX",
+}
+
+
+# Rich index metadata used by the new Markets page (8 cards + grouped pills).
+# region tags drive the "USA / EUROPE / ASIA / LATAM" grouping in the
+# index_selector component. Order is significant — the first 4 are US.
+INDEX_META: dict[str, dict[str, str]] = {
+    "^GSPC":   {"name": "S&P 500",            "region": "USA"},
+    "^IXIC":   {"name": "Nasdaq Composite",   "region": "USA"},
+    "^DJI":    {"name": "Dow Jones",          "region": "USA"},
+    "^RUT":    {"name": "Russell 2000",       "region": "USA"},
+    "^VIX":    {"name": "VIX",                "region": "USA"},
+    "^FTSE":   {"name": "FTSE 100",           "region": "EUROPE"},
+    "^GDAXI":  {"name": "DAX",                "region": "EUROPE"},
+    "^FCHI":   {"name": "CAC 40",             "region": "EUROPE"},
+    "^N225":   {"name": "Nikkei 225",         "region": "ASIA"},
+    "^HSI":    {"name": "Hang Seng",          "region": "ASIA"},
+    "000001.SS": {"name": "Shanghai Composite", "region": "ASIA"},
+    "^BVSP":   {"name": "Bovespa",            "region": "LATAM"},
+    "^MERV":   {"name": "Merval",             "region": "LATAM"},
 }
 
 # Default movers universe — major US large caps. Expandable.
@@ -65,19 +85,25 @@ def _yfinance():
 @st.cache_data(ttl=60, show_spinner=False)
 def get_indices() -> dict[str, dict]:
     """
-    Return a dict of {label: {last, change_abs, change_pct}}.
+    Return a dict of ``{symbol: {name, region, last, change_abs, change_pct}}``
+    for every index in ``INDEX_META`` (USA + Europe + Asia + LatAm).
 
-    Missing tickers come back with None values rather than raising.
+    Tickers that yfinance can't resolve come back with None values rather
+    than raising — the caller decides how to render the missing card.
     """
     yf = _yfinance()
     out: dict[str, dict] = {
-        label: {"last": None, "change_abs": None, "change_pct": None}
-        for label in INDEX_TICKERS
+        sym: {
+            "name": meta["name"],
+            "region": meta["region"],
+            "last": None, "change_abs": None, "change_pct": None,
+        }
+        for sym, meta in INDEX_META.items()
     }
     if yf is None:
         return out
 
-    tickers = list(INDEX_TICKERS.values())
+    tickers = list(INDEX_META.keys())
     try:
         df = yf.download(
             tickers,
@@ -95,31 +121,58 @@ def get_indices() -> dict[str, dict]:
     if df is None or df.empty:
         return out
 
-    for label, ticker in INDEX_TICKERS.items():
+    for sym in tickers:
         try:
             if isinstance(df.columns, pd.MultiIndex):
-                if ticker not in df.columns.get_level_values(0):
+                if sym not in df.columns.get_level_values(0):
                     continue
-                series = df[(ticker, "Close")].dropna()
+                series = df[(sym, "Close")].dropna()
             else:
-                series = df["Close"].dropna() if "Close" in df.columns else df[ticker].dropna()
+                series = (df["Close"].dropna() if "Close" in df.columns
+                          else df[sym].dropna())
             if len(series) < 2:
                 continue
             last = float(series.iloc[-1])
             prev = float(series.iloc[-2])
             change_abs = last - prev
             change_pct = (change_abs / prev) * 100.0 if prev else None
-            out[label] = {"last": last, "change_abs": change_abs, "change_pct": change_pct}
+            out[sym].update({
+                "last": last, "change_abs": change_abs, "change_pct": change_pct,
+            })
         except Exception as e:
-            log.warning("yf_index_parse_failed", label=label, error=str(e))
+            log.warning("yf_index_parse_failed", symbol=sym, error=str(e))
             continue
 
     return out
 
 
 # ============================================================
-# S&P 500 history
+# Index history (generic — works for any yfinance symbol)
 # ============================================================
+@st.cache_data(ttl=300, show_spinner=False)
+def get_index_history(symbol: str, period: str = "1y") -> pd.DataFrame:
+    """Daily/intraday OHLCV for any yfinance symbol over the window."""
+    yf = _yfinance()
+    if yf is None or not symbol:
+        return pd.DataFrame()
+    interval = PERIOD_TO_INTERVAL.get(period, "1d")
+    try:
+        df = yf.download(
+            symbol, period=period, interval=interval,
+            auto_adjust=False, progress=False, threads=False,
+        )
+    except Exception as e:
+        log.warning("yf_index_history_failed",
+                    symbol=symbol, period=period, error=str(e))
+        return pd.DataFrame()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
+
+
+# Backward-compatible alias used by older pages
 @st.cache_data(ttl=300, show_spinner=False)
 def get_spx_history(period: str = "1y") -> pd.DataFrame:
     """Daily (or intraday) OHLCV for S&P 500 over the requested window."""
@@ -223,45 +276,35 @@ def _beta_vs_spx(target: pd.Series, spx: pd.Series) -> float:
     return float(cov / var_m)
 
 
+# ---- Internal: fetch + compute the full panel (cached separately so
+#       sector/sort filters run instantly without re-hitting yfinance) ----
 @st.cache_data(ttl=300, show_spinner=False)
-def get_movers(
-    universe: Optional[list[str]] = None,
-    *,
-    sort_by: str = "gainers",
-    top_n: int = 10,
-) -> pd.DataFrame:
+def _fetch_movers_panel(tickers_key: tuple[str, ...]) -> pd.DataFrame:
     """
-    Compute movers for ``sort_by`` ∈ {gainers, losers, most_active}.
+    Batch-download price + volume for ``tickers_key`` and return a single
+    DataFrame with ticker / last / change_pct / beta / vol_30d / volume.
 
-    Output columns: ticker, name, last, change_pct, beta, vol_30d, volume.
+    The argument is a tuple so Streamlit can hash it; callers pass the
+    universe ticker list (de-duplicated, sorted).
     """
     yf = _yfinance()
-    if yf is None:
+    if yf is None or not tickers_key:
         return pd.DataFrame()
 
-    tickers = universe or DEFAULT_UNIVERSE
-
+    tickers = list(tickers_key)
     try:
         prices = yf.download(
             tickers + ["^GSPC"],
-            period="6mo",
-            interval="1d",
-            auto_adjust=False,
-            progress=False,
-            group_by="ticker",
-            threads=False,
+            period="6mo", interval="1d",
+            auto_adjust=False, progress=False,
+            group_by="ticker", threads=True,
         )
     except Exception as e:
-        log.warning("yf_movers_download_failed", error=str(e))
+        log.warning("yf_panel_movers_failed", n=len(tickers), error=str(e))
+        return pd.DataFrame()
+    if prices is None or prices.empty or not isinstance(prices.columns, pd.MultiIndex):
         return pd.DataFrame()
 
-    if prices is None or prices.empty:
-        return pd.DataFrame()
-
-    if not isinstance(prices.columns, pd.MultiIndex):
-        return pd.DataFrame()
-
-    # Benchmark series for beta
     try:
         spx_close = prices[("^GSPC", "Close")].dropna()
     except Exception:
@@ -280,36 +323,176 @@ def get_movers(
             prev = float(close.iloc[-2])
             change_pct = ((last / prev) - 1.0) * 100.0 if prev else float("nan")
             vol_30d = _annualized_vol(close.tail(30))
-            beta = _beta_vs_spx(close, spx_close) if not spx_close.empty else float("nan")
-            avg_volume = float(volume.tail(20).mean()) if not volume.empty else float("nan")
+            beta = (_beta_vs_spx(close, spx_close)
+                    if not spx_close.empty else float("nan"))
+            avg_volume = (float(volume.tail(20).mean())
+                          if not volume.empty else float("nan"))
             rows.append({
-                "ticker": tk,
-                "name": tk,            # name lookup deferred (avoids per-ticker .info hits)
-                "last": last,
-                "change_pct": change_pct,
-                "beta": beta,
-                "vol_30d": vol_30d,
-                "volume": avg_volume,
+                "ticker": tk, "last": last, "change_pct": change_pct,
+                "beta": beta, "vol_30d": vol_30d, "volume": avg_volume,
             })
-        except Exception as e:
-            log.warning("yf_mover_parse_failed", ticker=tk, error=str(e))
+        except Exception:
             continue
 
     if not rows:
         return pd.DataFrame()
+    return pd.DataFrame(rows)
 
-    df = pd.DataFrame(rows).dropna(subset=["change_pct"])
+
+def _decorate_with_meta(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach company name + sector + a market_cap proxy from constituents."""
+    if df.empty:
+        return df
+    from data.constituents import META
+
+    def _name(t: str) -> str:
+        return META.get(t, {}).get("name", t)
+
+    def _sector(t: str) -> str:
+        return META.get(t, {}).get("sector", "Other")
+
+    out = df.copy()
+    out["name"] = out["ticker"].map(_name)
+    out["sector"] = out["ticker"].map(_sector)
+    # Market cap proxy = last price × avg-20d-volume × 200 (rough liquidity
+    # ranking — real market cap requires a per-ticker .info call which we
+    # avoid here for batch-fetch performance).
+    out["market_cap"] = (out["last"] * out["volume"] * 200).where(
+        out["volume"].notna(), other=float("nan"),
+    )
+    return out
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_movers(
+    universe: Optional[list[str]] = None,
+    *,
+    sort_by: str = "gainers",
+    sector: Optional[str] = None,
+    top_n: int = 25,
+) -> pd.DataFrame:
+    """
+    Top-N movers — supports universe (tickers list), optional sector
+    filter, and ``sort_by`` ∈ {gainers, losers, most_active}.
+
+    Output columns:
+        ticker · name · sector · last · change_pct · beta · vol_30d ·
+        volume · market_cap
+    """
+    yf = _yfinance()
+    if yf is None:
+        return pd.DataFrame()
+
+    tickers: list[str]
+    if universe is None:
+        tickers = list(DEFAULT_UNIVERSE)
+    else:
+        tickers = list(universe)
+    tickers_key = tuple(sorted(set(tickers)))
+
+    panel = _fetch_movers_panel(tickers_key)
+    if panel.empty:
+        return panel
+
+    panel = _decorate_with_meta(panel).dropna(subset=["change_pct"])
+    if sector:
+        panel = panel[panel["sector"] == sector]
+    if panel.empty:
+        return panel
 
     if sort_by == "gainers":
-        df = df.sort_values("change_pct", ascending=False)
+        panel = panel.sort_values("change_pct", ascending=False)
     elif sort_by == "losers":
-        df = df.sort_values("change_pct", ascending=True)
+        panel = panel.sort_values("change_pct", ascending=True)
     elif sort_by in ("most_active", "active"):
-        df = df.sort_values("volume", ascending=False)
-    else:
-        df = df.sort_values("change_pct", ascending=False)
+        panel = panel.sort_values("volume", ascending=False)
+    return panel.head(top_n).reset_index(drop=True)
 
-    return df.head(top_n).reset_index(drop=True)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_movers_by_sector(
+    universe: Optional[list[str]] = None,
+    *,
+    per_sector: int = 5,
+    sort_by: str = "gainers",
+) -> dict[str, pd.DataFrame]:
+    """
+    Returns ``{sector: top_N_dataframe}`` for every GICS sector with at
+    least one constituent in the universe. Used by the Markets page when
+    "All sectors" is selected.
+    """
+    from data.constituents import SECTORS
+
+    if universe is None:
+        universe = list(DEFAULT_UNIVERSE)
+    panel = _fetch_movers_panel(tuple(sorted(set(universe))))
+    if panel.empty:
+        return {}
+
+    panel = _decorate_with_meta(panel).dropna(subset=["change_pct"])
+    out: dict[str, pd.DataFrame] = {}
+    for sec in SECTORS:
+        sub = panel[panel["sector"] == sec]
+        if sub.empty:
+            continue
+        if sort_by == "gainers":
+            sub = sub.sort_values("change_pct", ascending=False)
+        elif sort_by == "losers":
+            sub = sub.sort_values("change_pct", ascending=True)
+        elif sort_by in ("most_active", "active"):
+            sub = sub.sort_values("volume", ascending=False)
+        out[sec] = sub.head(per_sector).reset_index(drop=True)
+    return out
+
+
+# ============================================================
+# Sector performance — daily change of the 11 SPDR sector ETFs
+# ============================================================
+@st.cache_data(ttl=300, show_spinner=False)
+def get_sector_performance() -> pd.DataFrame:
+    """
+    Returns DataFrame with columns: sector · etf · last · change_pct ·
+    market_cap (proxy = price × avg volume × 200).
+    """
+    from data.constituents import SECTOR_ETFS
+
+    yf = _yfinance()
+    if yf is None:
+        return pd.DataFrame()
+
+    etfs = list(SECTOR_ETFS.values())
+    try:
+        df = yf.download(
+            etfs, period="5d", interval="1d",
+            auto_adjust=False, progress=False,
+            group_by="ticker", threads=True,
+        )
+    except Exception as e:
+        log.warning("yf_sector_perf_failed", error=str(e))
+        return pd.DataFrame()
+
+    if df is None or df.empty or not isinstance(df.columns, pd.MultiIndex):
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    for sector, etf in SECTOR_ETFS.items():
+        try:
+            close = df[(etf, "Close")].dropna()
+            volume = df[(etf, "Volume")].dropna()
+            if len(close) < 2:
+                continue
+            last = float(close.iloc[-1])
+            prev = float(close.iloc[-2])
+            change_pct = ((last / prev) - 1.0) * 100.0 if prev else float("nan")
+            avg_vol = float(volume.tail(5).mean()) if not volume.empty else 0.0
+            rows.append({
+                "sector": sector, "etf": etf,
+                "last": last, "change_pct": change_pct,
+                "market_cap": last * avg_vol * 200,
+            })
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
 
 
 # ============================================================

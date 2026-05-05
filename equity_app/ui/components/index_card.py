@@ -1,4 +1,4 @@
-"""Index card: label / value / change. Renders compact HTML."""
+"""Index card: label / value / change with optional click-to-select button."""
 from __future__ import annotations
 from typing import Optional
 
@@ -24,13 +24,45 @@ def render_index_card(
     last: Optional[float],
     change_abs: Optional[float],
     change_pct: Optional[float],
+    *,
+    is_active: bool = False,
+    selectable: bool = False,
+    symbol: Optional[str] = None,
+    on_select=None,
 ) -> None:
+    """
+    Render an index card.
+
+    Args:
+        is_active:   draws a 2px gold border around the card (used to
+                     mirror the chart's currently-displayed index)
+        selectable:  shows a small "Show on chart" button below the card
+        symbol:      yfinance symbol passed to ``on_select`` when clicked
+        on_select:   callback(symbol) — fired on the click
+    """
     chg_text, chg_cls = _fmt_change(change_abs, change_pct)
+    border_style = (
+        "border: 2px solid var(--accent);"
+        if is_active else
+        "border: 1px solid var(--border);"
+    )
     html = f"""
-    <div class="eq-card" role="group" aria-label="{label} index">
+    <div class="eq-card" role="group" aria-label="{label} index"
+         style="{border_style}">
         <div class="eq-idx-label">{label}</div>
         <div class="eq-idx-value">{_fmt_value(last)}</div>
         <div class="eq-idx-change {chg_cls}">{chg_text}</div>
     </div>
     """
     st.markdown(html, unsafe_allow_html=True)
+
+    if selectable and symbol and on_select is not None:
+        if st.button(
+            "► Show on chart" if not is_active else "● On chart",
+            key=f"select_index_{symbol}",
+            disabled=is_active,
+            type=("primary" if is_active else "secondary"),
+            use_container_width=True,
+        ):
+            on_select(symbol)
+            st.rerun()
