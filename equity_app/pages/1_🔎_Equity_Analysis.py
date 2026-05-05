@@ -393,9 +393,11 @@ if peers_demo:
 st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
 (tab_overview, tab_valuation, tab_financials, tab_ratios,
- tab_quality, tab_peers, tab_capital, tab_charts) = st.tabs([
+ tab_quality, tab_peers, tab_capital, tab_insiders,
+ tab_charts) = st.tabs([
     "Overview", "Valuation", "Financials", "Ratios",
-    "Quality", "Peers", "Capital allocation", "Charts",
+    "Quality", "Peers", "Capital allocation", "Insiders",
+    "Charts",
 ])
 
 
@@ -541,11 +543,22 @@ with tab_overview:
         use_container_width=True, config={"displayModeBar": False},
     )
 
+    # ---- Institutional holders snapshot (yfinance) ----
+    from analysis.institutional_analysis import get_holdings_snapshot
+    from ui.components.institutional_holders_card import render_institutional_holders_card
+
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="eq-section-label">INSTITUTIONAL HOLDERS · SNAPSHOT</div>',
+        unsafe_allow_html=True,
+    )
+    snap = get_holdings_snapshot(active_ticker)
+    render_institutional_holders_card(snap, target_ticker=active_ticker)
+
     st.caption(
-        "Sections still pending live-data wiring: segments / geography, "
-        "analyst ratings, institutional holders, news + sentiment, "
-        "short interest, events timeline. They land when the FMP / "
-        "EDGAR / news endpoints come online."
+        "Pending live-data wiring: segments / geography, analyst ratings, "
+        "news + sentiment, short interest, events timeline. They land when "
+        "the FMP / EDGAR / news endpoints come online."
     )
 
 
@@ -761,6 +774,18 @@ with tab_valuation:
             use_container_width=True, config={"displayModeBar": False},
         )
 
+    # ---- Earnings track record (beats / misses via yfinance) ----
+    from analysis.earnings_track_record import get_earnings_history
+    from ui.components.earnings_history_chart import render_earnings_track_record
+
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="eq-section-label">EARNINGS TRACK RECORD · BEATS vs MISSES</div>',
+        unsafe_allow_html=True,
+    )
+    eh = get_earnings_history(active_ticker)
+    render_earnings_track_record(eh)
+
 
 # ---- Financials ----
 with tab_financials:
@@ -873,22 +898,13 @@ with tab_ratios:
 
 # ---- Quality ----
 with tab_quality:
-    st.markdown(
-        '<div class="eq-section-label">EARNINGS QUALITY · OVERALL FLAG '
-        f'<span style="color:var(--accent);">{eq.overall_flag.upper()}</span>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-    flags = [f for f in (eq.beneish, eq.piotroski, eq.sloan) if f is not None]
-    if flags:
-        rows = pd.DataFrame([{
-            "Metric": f.name, "Score": f.score,
-            "Flag": f.flag.upper(), "Explanation": f.explanation,
-        } for f in flags])
-        st.dataframe(
-            rows, hide_index=True, use_container_width=True,
-            column_config={"Score": st.column_config.NumberColumn(format="%.2f")},
-        )
+    from ui.components.eq_score_card import render_earnings_quality_detail
+    from ui.components.red_flags_comparison import render_red_flags_comparison
+
+    if any(f is not None for f in (eq.beneish, eq.piotroski, eq.sloan)):
+        render_earnings_quality_detail(eq)
+        st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+        render_red_flags_comparison(active_ticker, eq)
     else:
         st.info("Earnings-quality models could not be computed for this fixture.")
 
@@ -939,14 +955,45 @@ with tab_peers:
 # ---- Capital allocation ----
 with tab_capital:
     from analysis.capital_allocation import analyze_capital_allocation
+    from analysis.working_capital import analyze_ccc
     from ui.components.capital_allocation_dashboard import (
         render_capital_allocation_dashboard,
     )
+    from ui.components.ccc_chart import render_ccc_dashboard
+
     capital_result = analyze_capital_allocation(
         income=inc, balance=bal, cash=cf,
         market_cap=_DEMO_MARKET_CAP.get(active_ticker),
     )
     render_capital_allocation_dashboard(capital_result)
+
+    # ---- Cash Conversion Cycle ----
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="eq-section-label">WORKING CAPITAL · CASH CONVERSION CYCLE</div>',
+        unsafe_allow_html=True,
+    )
+    ccc_result = analyze_ccc(income=inc, balance=bal, sector=sector)
+    render_ccc_dashboard(ccc_result)
+
+
+# ---- Insiders (placeholder until FMP is wired) ----
+with tab_insiders:
+    st.markdown(
+        '<div class="eq-card" style="padding:24px; '
+        'border-left:3px solid var(--accent);">'
+        '<div class="eq-section-label">INSIDER TRANSACTIONS · COMING SOON</div>'
+        '<div style="color:var(--text-secondary); font-size:13px; '
+        'line-height:1.6; margin-top:10px;">'
+        'Form-4 insider transaction analysis (CEO/CFO buy-sell patterns, '
+        'cluster-buying detection, 6-month sentiment trend) needs the '
+        'FMP <code>v4/insider-trading</code> endpoint, which isn\'t wired '
+        'in yet. The data adapter is structured so that flipping '
+        '<code>EQUITY_APP_DATA_SOURCE=fmp</code> will populate this tab '
+        'without further changes here.'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ---- Charts ----
