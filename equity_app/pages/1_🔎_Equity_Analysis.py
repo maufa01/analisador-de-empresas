@@ -115,21 +115,83 @@ _DEMO_SECTOR: dict[str, str] = {
 
 
 # ============================================================
-# Inputs row
+# Landing-state vs analysis-state branching
+#
+# When no ticker has been analysed yet (or the user clicked
+# "Back to home"), render the landing: hero searchbox · market pulse
+# strip · 2x2 grid (watchlist / recently / trending / popular) +
+# educational cards. The analysis pipeline runs ONLY when a ticker is
+# active.
 # ============================================================
-st.markdown(
-    '<div class="eq-section-label">EQUITY ANALYSIS</div>',
-    unsafe_allow_html=True,
+from data.watchlist_db import (
+    push_recent, list_watchlist, is_in_watchlist,
+    add_to_watchlist, remove_from_watchlist,
 )
+from ui.components.landing_hero import render_landing_hero
+from ui.components.market_pulse_strip import render_market_pulse_strip
+from ui.components.landing_grid import render_landing_grid
+from ui.components.educational_cards import render_educational_cards
 
+
+def _set_active(t: str) -> None:
+    """Wire callback for any landing-card click — flips into analysis state."""
+    st.session_state["eq_active_ticker"] = t.upper()
+    push_recent(t.upper())
+
+
+active_ticker: str | None = st.session_state.get("eq_active_ticker")
+
+# ---- LANDING STATE ----
+if active_ticker is None:
+    picked = render_landing_hero(key="landing_searchbox")
+    if picked:
+        _set_active(picked)
+        st.rerun()
+
+    st.markdown("<div style='height:32px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="eq-section-label">MARKET PULSE</div>',
+        unsafe_allow_html=True,
+    )
+    render_market_pulse_strip()
+
+    st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
+    render_landing_grid(on_select=_set_active)
+
+    st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
+    render_educational_cards()
+    st.stop()
+
+
+# ============================================================
+# ANALYSIS STATE — toolbar with back-to-home + ticker switcher
+# ============================================================
+back_l, back_mid, back_r = st.columns([1, 4, 1.4])
+with back_l:
+    if st.button("← Back to home", key="back_to_home", type="secondary",
+                 use_container_width=True):
+        st.session_state.pop("eq_active_ticker", None)
+        st.rerun()
+with back_mid:
+    st.markdown(
+        '<div class="eq-section-label" style="text-align:center; '
+        'padding-top:6px;">EQUITY ANALYSIS</div>',
+        unsafe_allow_html=True,
+    )
+with back_r:
+    in_wl = is_in_watchlist(active_ticker)
+    btn_label = "★ In watchlist" if in_wl else "☆ Add to watchlist"
+    if st.button(btn_label, key="watchlist_toggle", type="secondary",
+                 use_container_width=True):
+        if in_wl:
+            remove_from_watchlist(active_ticker)
+        else:
+            add_to_watchlist(active_ticker)
+        st.rerun()
+
+# Compact secondary inputs row — lets the user switch ticker without
+# returning to the landing.
 _LABELS: list[str] = ticker_labels(SP500_TOP)
-
-lab1, lab2, lab3, lab4 = st.columns([0.9, 4.0, 2.0, 1.1])
-with lab1: st.markdown('<div class="eq-section-label">MODE</div>', unsafe_allow_html=True)
-with lab2: st.markdown('<div class="eq-section-label">TICKER</div>', unsafe_allow_html=True)
-with lab3: st.markdown('<div class="eq-section-label">PEERS</div>', unsafe_allow_html=True)
-with lab4: st.markdown('<div class="eq-section-label">&nbsp;</div>', unsafe_allow_html=True)
-
 ic1, ic2, ic3, ic4 = st.columns([0.9, 4.0, 2.0, 1.1])
 with ic1:
     use_custom = st.toggle(
@@ -139,45 +201,31 @@ with ic1:
 with ic2:
     if use_custom:
         ticker = st.text_input(
-            "Ticker", value="AAPL", label_visibility="collapsed",
-            placeholder="Type a ticker (e.g. AAPL)",
+            "Ticker", value=active_ticker, label_visibility="collapsed",
+            placeholder="Type a ticker",
         ).strip().upper()
     else:
         default_idx = next(
-            (i for i, lbl in enumerate(_LABELS) if lbl.startswith("AAPL ")),
+            (i for i, lbl in enumerate(_LABELS)
+             if lbl.startswith(f"{active_ticker} ")),
             0,
         )
         chosen_label = st.selectbox(
             "Ticker", options=_LABELS, index=default_idx,
             label_visibility="collapsed",
-            placeholder="🔎  Search ticker or company…",
+            placeholder="🔎  Search ticker…",
         )
         ticker = ticker_from_label(chosen_label)
 with ic3:
     peers_raw = st.text_input(
         "Peers", value="MSFT,GOOGL,META",
         label_visibility="collapsed",
-        placeholder="Comma-separated",
+        placeholder="Comma-separated peers",
     )
 with ic4:
-    analyze = st.button("Analyze", type="primary", use_container_width=True)
-
-
-# ============================================================
-# Active ticker bookkeeping
-# ============================================================
-if analyze:
-    st.session_state["eq_active_ticker"] = ticker
-
-active_ticker: str | None = st.session_state.get("eq_active_ticker")
-
-if active_ticker is None:
-    st.markdown(
-        '<div class="eq-card" style="text-align:center; padding:48px 16px; '
-        'color:var(--text-muted);">Pick a ticker and press Analyze.</div>',
-        unsafe_allow_html=True,
-    )
-    st.stop()
+    if st.button("Re-analyze", type="primary", use_container_width=True):
+        _set_active(ticker)
+        st.rerun()
 
 data = _load_demo(active_ticker)
 if data is None:

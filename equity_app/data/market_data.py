@@ -163,6 +163,61 @@ def get_index_history(symbol: str, period: str = "1y") -> pd.DataFrame:
     return df
 
 
+# Multi-symbol last/change snapshot — used by the market-pulse strip on
+# the Equity Analysis landing (S&P 500, Nasdaq, VIX, 10Y, Gold, BTC, …).
+@st.cache_data(ttl=60, show_spinner=False)
+def get_pulse_quotes(symbols: tuple[str, ...]) -> dict[str, dict]:
+    """
+    Returns ``{symbol: {last, change_abs, change_pct}}`` for any mix of
+    indices / commodities / crypto / FX symbols yfinance can resolve.
+    Tickers it can't fetch come back with all-None values rather than
+    raising — the strip just renders them as ``"—"``.
+    """
+    yf = _yfinance()
+    out: dict[str, dict] = {
+        s: {"last": None, "change_abs": None, "change_pct": None}
+        for s in symbols
+    }
+    if yf is None or not symbols:
+        return out
+
+    try:
+        df = yf.download(
+            list(symbols), period="5d", interval="1d",
+            auto_adjust=False, progress=False,
+            group_by="ticker", threads=True,
+        )
+    except Exception as e:
+        log.warning("yf_pulse_failed", symbols=symbols, error=str(e))
+        return out
+
+    if df is None or df.empty:
+        return out
+
+    for sym in symbols:
+        try:
+            if isinstance(df.columns, pd.MultiIndex):
+                if sym not in df.columns.get_level_values(0):
+                    continue
+                series = df[(sym, "Close")].dropna()
+            else:
+                series = (df["Close"].dropna() if "Close" in df.columns
+                          else df[sym].dropna())
+            if len(series) < 2:
+                continue
+            last = float(series.iloc[-1])
+            prev = float(series.iloc[-2])
+            change_abs = last - prev
+            change_pct = (change_abs / prev) * 100.0 if prev else None
+            out[sym].update({
+                "last": last, "change_abs": change_abs, "change_pct": change_pct,
+            })
+        except Exception:
+            continue
+
+    return out
+
+
 # Single-ticker price history — used by the Overview tab's price chart
 # and returns table on the Equity Analysis page.
 @st.cache_data(ttl=300, show_spinner=False)
