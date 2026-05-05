@@ -1,16 +1,19 @@
 """
-Markets — home page (rewritten).
+Markets — home page.
 
 Layout (top → bottom):
     1. Header label + live market-status pill (right-aligned)
-    2. Two rows of 4 index cards (USA + International, gold border on the
-       index currently displayed in the chart)
-    3. Index selector (pills grouped by region) + main chart with header
-       metric + period selector
-    4. Sector heatmap (Plotly treemap of the 11 SPDR sector ETFs) + a
-       row of "click to filter" buttons under it
-    5. Top movers — universe + sort + sector pills, supporting an
-       "All sectors" grouped view that lists 5 names per sector
+    2. ONE row of 4 USA index cards (S&P 500 · Nasdaq · Dow · VIX)
+       — clicking a card swaps the chart below; the active card carries
+       a 2px gold border.
+    3. Main index chart with subtle period pills (1D / 1M / 1Y / 5Y).
+    4. Sector performance heatmap (11 SPDR sector ETFs) + a row of
+       click-to-filter buttons under it.
+    5. Top movers — universe + sort + sector pills, with an
+       "All sectors" grouped view that lists 5 names per sector.
+
+International indices and the "Index Explorer" pill selector were
+removed per the rollback request — only the 4 USA benchmarks remain.
 """
 from __future__ import annotations
 import sys
@@ -31,7 +34,6 @@ from data.market_data import (
 )
 from ui.charts.sp500_chart import build_sp500_figure
 from ui.components.index_card import render_index_card
-from ui.components.index_selector import render_index_selector
 from ui.components.market_status import render_status_live
 from ui.components.movers_table import render_movers, render_movers_grouped
 from ui.components.period_selector import render_period_selector, to_yf_period
@@ -50,7 +52,7 @@ except ImportError:
 
 
 # ============================================================
-# Header
+# 1 — Header
 # ============================================================
 header_l, header_r = st.columns([4, 1])
 with header_l:
@@ -63,7 +65,7 @@ with header_r:
 
 
 # ============================================================
-# Two rows of 4 index cards (active card highlighted in gold)
+# 2 — 4 USA index cards (one row). Clicking swaps the chart.
 # ============================================================
 indices = get_indices()
 active_symbol: str = st.session_state.get("active_index_symbol", "^GSPC")
@@ -73,26 +75,22 @@ def _set_active(sym: str) -> None:
     st.session_state["active_index_symbol"] = sym
 
 
-# Row 1 — US benchmarks
-ROW1: tuple[str, ...] = ("^GSPC", "^IXIC", "^DJI", "^RUT")
-# Row 2 — International + volatility
-ROW2: tuple[str, ...] = ("^FTSE", "^GDAXI", "^N225", "^VIX")
+USA_ROW: tuple[str, ...] = ("^GSPC", "^IXIC", "^DJI", "^VIX")
 
-for row_syms in (ROW1, ROW2):
-    cols = st.columns(len(row_syms))
-    for col, sym in zip(cols, row_syms):
-        data = indices.get(sym, {})
-        with col:
-            render_index_card(
-                label=data.get("name", sym),
-                last=data.get("last"),
-                change_abs=data.get("change_abs"),
-                change_pct=data.get("change_pct"),
-                is_active=(sym == active_symbol),
-                selectable=True,
-                symbol=sym,
-                on_select=_set_active,
-            )
+cols = st.columns(len(USA_ROW))
+for col, sym in zip(cols, USA_ROW):
+    data = indices.get(sym, {})
+    with col:
+        render_index_card(
+            label=data.get("name", sym),
+            last=data.get("last"),
+            change_abs=data.get("change_abs"),
+            change_pct=data.get("change_pct"),
+            is_active=(sym == active_symbol),
+            selectable=True,
+            symbol=sym,
+            on_select=_set_active,
+        )
 
 if all(v.get("last") is None for v in indices.values()):
     st.info(
@@ -103,18 +101,10 @@ if all(v.get("last") is None for v in indices.values()):
 
 
 # ============================================================
-# Index selector + main chart
+# 3 — Main index chart
 # ============================================================
-st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-st.markdown(
-    '<div class="eq-section-label">INDEX EXPLORER</div>',
-    unsafe_allow_html=True,
-)
+st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
 
-active_symbol = render_index_selector(default=active_symbol,
-                                       key="active_index_symbol")
-
-st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
 chart_l, chart_r = st.columns([3, 1])
 active = indices.get(active_symbol, {})
 
@@ -145,7 +135,7 @@ st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
 # ============================================================
-# Sector performance heatmap
+# 4 — Sector performance heatmap
 # ============================================================
 st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
 st.markdown(
@@ -165,7 +155,7 @@ render_sector_heatmap(sectors_df, on_select=_select_sector, height=240)
 
 
 # ============================================================
-# Top movers — universe + sort + sector pills
+# 5 — Top movers (universe + sort + sector segmentation)
 # ============================================================
 st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
 
@@ -187,7 +177,6 @@ with mv_r:
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
-# Universe + sector pills row
 fl, fr = st.columns([1.2, 4])
 with fl:
     universe = st.selectbox(

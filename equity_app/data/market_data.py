@@ -28,23 +28,14 @@ INDEX_TICKERS: dict[str, str] = {
 }
 
 
-# Rich index metadata used by the new Markets page (8 cards + grouped pills).
-# region tags drive the "USA / EUROPE / ASIA / LATAM" grouping in the
-# index_selector component. Order is significant — the first 4 are US.
+# Rich index metadata for the Markets page header row. Restricted to the
+# four USA benchmarks the page actually shows; international indices were
+# rolled back per user feedback (the grouped pill selector felt loud).
 INDEX_META: dict[str, dict[str, str]] = {
-    "^GSPC":   {"name": "S&P 500",            "region": "USA"},
-    "^IXIC":   {"name": "Nasdaq Composite",   "region": "USA"},
-    "^DJI":    {"name": "Dow Jones",          "region": "USA"},
-    "^RUT":    {"name": "Russell 2000",       "region": "USA"},
-    "^VIX":    {"name": "VIX",                "region": "USA"},
-    "^FTSE":   {"name": "FTSE 100",           "region": "EUROPE"},
-    "^GDAXI":  {"name": "DAX",                "region": "EUROPE"},
-    "^FCHI":   {"name": "CAC 40",             "region": "EUROPE"},
-    "^N225":   {"name": "Nikkei 225",         "region": "ASIA"},
-    "^HSI":    {"name": "Hang Seng",          "region": "ASIA"},
-    "000001.SS": {"name": "Shanghai Composite", "region": "ASIA"},
-    "^BVSP":   {"name": "Bovespa",            "region": "LATAM"},
-    "^MERV":   {"name": "Merval",             "region": "LATAM"},
+    "^GSPC":   {"name": "S&P 500",          "region": "USA"},
+    "^IXIC":   {"name": "Nasdaq Composite", "region": "USA"},
+    "^DJI":    {"name": "Dow Jones",        "region": "USA"},
+    "^VIX":    {"name": "VIX",              "region": "USA"},
 }
 
 # Default movers universe — major US large caps. Expandable.

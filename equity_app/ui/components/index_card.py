@@ -57,11 +57,14 @@ def render_index_card(
     st.markdown(html, unsafe_allow_html=True)
 
     if selectable and symbol and on_select is not None:
+        # Always use the muted outline secondary style; the gold border on
+        # the card itself signals the active state. Avoids the "bright red
+        # primary button" look that the previous version had.
         if st.button(
-            "► Show on chart" if not is_active else "● On chart",
+            "On chart" if is_active else "Show on chart",
             key=f"select_index_{symbol}",
             disabled=is_active,
-            type=("primary" if is_active else "secondary"),
+            type="secondary",
             use_container_width=True,
         ):
             on_select(symbol)
