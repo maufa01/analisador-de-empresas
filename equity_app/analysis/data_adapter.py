@@ -137,8 +137,28 @@ def _from_yfinance(ticker: str) -> Optional[FinancialsBundle]:
 
 
 def _from_fmp(ticker: str) -> Optional[FinancialsBundle]:
-    """Stub — FMP provider isn't wired yet."""
-    return None
+    """Use the existing FMPProvider class. Returns None when the key
+    isn't set or the request fails — the caller will fall through to
+    yfinance via the chain in ``get_financials``."""
+    try:
+        from data.fmp_provider import FMPProvider
+        from core.exceptions import MissingAPIKeyError, TickerNotFoundError, ProviderError
+    except Exception:
+        return None
+    try:
+        prov = FMPProvider()
+        income  = prov.fetch_income_statement(ticker, years=10)
+        balance = prov.fetch_balance_sheet(ticker, years=10)
+        cash    = prov.fetch_cash_flow(ticker, years=10)
+    except (MissingAPIKeyError, TickerNotFoundError, ProviderError):
+        return None
+    except Exception:
+        return None
+    if income.empty and balance.empty and cash.empty:
+        return None
+    return FinancialsBundle(
+        income=income, balance=balance, cash=cash, source="fmp",
+    )
 
 
 # ============================================================
@@ -182,21 +202,86 @@ def get_financials(ticker: str) -> Optional[FinancialsBundle]:
 
 
 # ---- FMP-only endpoints ----
+# All four return None when FMP_API_KEY is not configured (graceful no-op).
+# Callers branch on None and render an empty state.
 def get_insider_transactions(ticker: str) -> Optional[pd.DataFrame]:
-    """Form 4 transactions. Returns None until FMP is wired in."""
-    return None
+    """Form 4 transactions from FMP v4 — empty DataFrame is also returned
+    as None so callers have a single sentinel to check."""
+    try:
+        from data import fmp_extras
+    except Exception:
+        return None
+    if not fmp_extras.is_available():
+        return None
+    df = fmp_extras.fetch_insider_transactions(ticker, limit=200)
+    return df if not df.empty else None
 
 
 def get_segments(ticker: str) -> Optional[pd.DataFrame]:
-    """Revenue by product segment. Returns None until FMP is wired in."""
-    return None
+    """Revenue by product segment from FMP v4."""
+    try:
+        from data import fmp_extras
+    except Exception:
+        return None
+    if not fmp_extras.is_available():
+        return None
+    df = fmp_extras.fetch_revenue_by_segment(ticker)
+    return df if not df.empty else None
 
 
 def get_geography(ticker: str) -> Optional[pd.DataFrame]:
-    """Revenue by region. Returns None until FMP is wired in."""
-    return None
+    """Revenue by region from FMP v4."""
+    try:
+        from data import fmp_extras
+    except Exception:
+        return None
+    if not fmp_extras.is_available():
+        return None
+    df = fmp_extras.fetch_revenue_by_geography(ticker)
+    return df if not df.empty else None
 
 
-def get_analyst_estimates(ticker: str) -> Optional[dict]:
-    """Forward consensus EPS / revenue. Returns None until FMP is wired in."""
-    return None
+def get_analyst_estimates(ticker: str, period: str = "quarter") -> Optional[pd.DataFrame]:
+    """Forward consensus EPS / revenue from FMP."""
+    try:
+        from data import fmp_extras
+    except Exception:
+        return None
+    if not fmp_extras.is_available():
+        return None
+    df = fmp_extras.fetch_analyst_estimates(ticker, period=period)
+    return df if not df.empty else None
+
+
+def get_etf_holders(ticker: str) -> Optional[pd.DataFrame]:
+    """Which ETFs hold this ticker — FMP only."""
+    try:
+        from data import fmp_extras
+    except Exception:
+        return None
+    if not fmp_extras.is_available():
+        return None
+    df = fmp_extras.fetch_etf_holders(ticker)
+    return df if not df.empty else None
+
+
+def get_extended_earnings_history(ticker: str, limit: int = 20) -> Optional[pd.DataFrame]:
+    """16+ quarters of EPS + revenue actuals/estimates — FMP only."""
+    try:
+        from data import fmp_extras
+    except Exception:
+        return None
+    if not fmp_extras.is_available():
+        return None
+    df = fmp_extras.fetch_earnings_history(ticker, limit=limit)
+    return df if not df.empty else None
+
+
+def fmp_available() -> bool:
+    """True iff FMP_API_KEY is set — UI uses this to decide between live
+    data and the 'configure FMP' empty state."""
+    try:
+        from data import fmp_extras
+        return fmp_extras.is_available()
+    except Exception:
+        return False

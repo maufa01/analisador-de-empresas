@@ -591,6 +591,51 @@ with tab_overview:
     news_res = analyze_ticker_news(active_ticker, limit=30, engine=engine)
     render_news_sentiment_panel(news_res)
 
+    # ---- Segments + Geography (FMP-only) ----
+    from analysis.segments import (
+        analyze_segments, analyze_geography, value_segments_sotp,
+    )
+    from ui.components.segments_panel import (
+        render_segments_panel, render_geography_panel, render_sotp_panel,
+    )
+
+    segments_res = analyze_segments(active_ticker)
+    geography_res = analyze_geography(active_ticker)
+
+    if segments_res.available or geography_res.available:
+        st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+        if segments_res.available:
+            render_segments_panel(segments_res)
+        if geography_res.available:
+            st.markdown("<div style='height:14px;'></div>",
+                        unsafe_allow_html=True)
+            render_geography_panel(geography_res)
+
+        # SOTP only makes sense with at least 2 segments
+        if segments_res.available and segments_res.n_segments >= 2:
+            st.markdown("<div style='height:14px;'></div>",
+                        unsafe_allow_html=True)
+            try:
+                from analysis.ratios import _get
+                shares_out = None
+                _shares = _get(inc, "weighted_avg_shares")
+                if _shares is not None and not _shares.dropna().empty:
+                    shares_out = float(_shares.dropna().iloc[-1])
+                _cash = _get(bal, "cash_eq")
+                _debt = _get(bal, "total_debt")
+                cash_bs = float(_cash.dropna().iloc[-1]) if _cash is not None and not _cash.dropna().empty else 0.0
+                debt_bs = float(_debt.dropna().iloc[-1]) if _debt is not None and not _debt.dropna().empty else 0.0
+                sotp_res = value_segments_sotp(
+                    segments=segments_res,
+                    market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+                    net_debt=(debt_bs - cash_bs),
+                    shares_outstanding=shares_out,
+                    current_price=current_price,
+                )
+                render_sotp_panel(sotp_res)
+            except Exception:
+                pass
+
     # ---- AI thesis prompt generator (offline mode) ----
     from analysis.shareholder_yield import calculate_shareholder_yield as _sy_for_prompt
     from analysis.ai_thesis_prompt import build_thesis_prompt
@@ -1105,23 +1150,19 @@ with tab_capital:
     render_shareholder_yield_card(sy_result)
 
 
-# ---- Insiders (placeholder until FMP is wired) ----
+# ---- Insiders (real Form-4 analysis when FMP key configured) ----
 with tab_insiders:
-    st.markdown(
-        '<div class="eq-card" style="padding:24px; '
-        'border-left:3px solid var(--accent);">'
-        '<div class="eq-section-label">INSIDER TRANSACTIONS · COMING SOON</div>'
-        '<div style="color:var(--text-secondary); font-size:13px; '
-        'line-height:1.6; margin-top:10px;">'
-        'Form-4 insider transaction analysis (CEO/CFO buy-sell patterns, '
-        'cluster-buying detection, 6-month sentiment trend) needs the '
-        'FMP <code>v4/insider-trading</code> endpoint, which isn\'t wired '
-        'in yet. The data adapter is structured so that flipping '
-        '<code>EQUITY_APP_DATA_SOURCE=fmp</code> will populate this tab '
-        'without further changes here.'
-        '</div></div>',
-        unsafe_allow_html=True,
-    )
+    from analysis.insider_analysis import analyze_insider_activity
+    from analysis.etf_analysis import analyze_etf_holdings
+    from ui.components.insider_panel import render_insider_panel
+    from ui.components.etf_holdings_panel import render_etf_holdings_panel
+
+    insider_res = analyze_insider_activity(active_ticker, months=24)
+    render_insider_panel(insider_res)
+
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    etf_res = analyze_etf_holdings(active_ticker)
+    render_etf_holdings_panel(etf_res)
 
 
 # ---- Charts ----

@@ -84,12 +84,63 @@ def _consistency_label(beat_rate: Optional[float], surprise_std: Optional[float]
 # ============================================================
 # Public API
 # ============================================================
+def _from_fmp_extended(ticker: str) -> Optional[EarningsHistory]:
+    """16+ quarters from FMP when ``FMP_API_KEY`` is set. Returns None
+    silently if the key isn't configured or the request fails."""
+    try:
+        from data import fmp_extras
+    except Exception:
+        return None
+    if not fmp_extras.is_available():
+        return None
+    raw = fmp_extras.fetch_earnings_history(ticker, limit=20)
+    if raw is None or raw.empty:
+        return None
+    df = raw.copy()
+    if "epsActual" in df.columns:
+        df = df.rename(columns={
+            "epsActual":         "eps_actual",
+            "epsEstimated":      "eps_estimate",
+            "eps_surprise":      "surprise",
+            "eps_surprise_pct":  "surprise_pct",
+            "beat_eps":          "beat",
+        })
+    if "date" in df.columns:
+        df = df.set_index("date").sort_index(ascending=False)
+
+    beat_rate = avg = med = std = None
+    if "beat" in df.columns:
+        beats = int(df["beat"].dropna().sum())
+        total = int(df["beat"].dropna().count())
+        beat_rate = beats / total if total else None
+    if "surprise_pct" in df.columns:
+        sp = df["surprise_pct"].dropna()
+        if not sp.empty:
+            avg = float(sp.mean())
+            med = float(sp.median())
+            std = float(sp.std(ddof=1)) if len(sp) > 1 else None
+
+    return EarningsHistory(
+        quarters=df,
+        beat_rate=beat_rate,
+        avg_surprise=avg,
+        median_surprise=med,
+        consistency=_consistency_label(beat_rate, std),
+        next_date=None, eps_estimate=None, revenue_estimate=None,
+        note=f"{len(df)}-quarter history from FMP.",
+    )
+
+
 @st.cache_data(ttl=21_600, show_spinner=False)
 def get_earnings_history(ticker: str) -> EarningsHistory:
     """
-    Returns an ``EarningsHistory`` with up to 4 recent quarters of
-    actual-vs-estimate EPS data plus the next-earnings calendar entry.
+    Prefers FMP (16+ quarters) when the API key is configured. Falls back
+    to yfinance (last ~4 quarters) when FMP is unavailable.
     """
+    fmp_result = _from_fmp_extended(ticker)
+    if fmp_result is not None:
+        return fmp_result
+
     yf = _yfinance()
     if yf is None or not ticker:
         return EarningsHistory(quarters=pd.DataFrame(),
