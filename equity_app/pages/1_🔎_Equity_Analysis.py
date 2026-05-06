@@ -1131,9 +1131,24 @@ with tab_financials:
         "Debt/Equity", "Current Ratio",
         "FCF Margin %", "FCF Adj Margin %", "Cash Conversion",
     ) if c in ratios.columns]
-    transposed = ratios[show_cols].T
-    transposed.columns = [d.strftime("%Y") if hasattr(d, "strftime") else str(d)
-                          for d in transposed.columns]
+
+    # Drop duplicate period_end rows (SEC sometimes ships restatements /
+    # 10-K/A amendments under the same fiscal-year-end). Keep the most
+    # recent one — ratios is sorted ascending by date, so 'last' wins.
+    ratios_dedup = ratios[~ratios.index.duplicated(keep="last")]
+    transposed = ratios_dedup[show_cols].T
+
+    # Year-only labels collide when two filings sit in the same year
+    # (e.g. fiscal-year-end shifts). Disambiguate with a numeric suffix
+    # so st.dataframe / Arrow doesn't raise 'Duplicate column names'.
+    seen: dict[str, int] = {}
+    new_cols: list[str] = []
+    for d in transposed.columns:
+        base = d.strftime("%Y") if hasattr(d, "strftime") else str(d)
+        n = seen.get(base, 0)
+        seen[base] = n + 1
+        new_cols.append(base if n == 0 else f"{base} ({n + 1})")
+    transposed.columns = new_cols
     st.dataframe(transposed.round(2), use_container_width=True, height=440)
 
 
