@@ -81,7 +81,6 @@ from analysis.data_adapter import (
     get_current_price as _live_get_current_price,
     get_company_info as _live_get_company_info,
     require_financials as _live_require_financials,
-    validate_ticker as _live_validate_ticker,
 )
 
 
@@ -253,18 +252,12 @@ _resolved = _resolve_ticker(active_ticker)
 if maybe_render_non_standard_view(_resolved):
     st.stop()
 
-# At this point the resolver said: full / full_bank / full_reit /
-# full_insurance / partial. The sector dashboards (when applicable)
-# have already been rendered above; the standard pipeline now runs.
-
-# Validate ticker against live providers (defensive — should already
-# have succeeded during classification, but providers can flake).
-try:
-    _live_validate_ticker(active_ticker)
-except ValueError as exc:
-    st.error(f"`{active_ticker}` not found in any provider. {exc}")
-    st.caption("Try a valid US-listed ticker (e.g. AAPL, NVDA, NFLX, KO).")
-    st.stop()
+# The resolver already validated the ticker against SEC EDGAR and / or
+# yfinance during classification. We trust that result — re-running
+# validate_ticker here would just hit two more providers and add a
+# fragile failure mode (race vs. yfinance / Finnhub rate limits).
+# If a downstream fetch (price, company info, financials) flakes,
+# its own try/except below produces a specific, accurate error.
 
 with st.spinner(f"Fetching {active_ticker} live data…"):
     try:
