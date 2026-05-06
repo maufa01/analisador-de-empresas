@@ -204,19 +204,22 @@ h1, h2, h3, h4, h5 {{
 }}
 
 /* st.radio — Streamlit's default primary is a coral that clashes with the
-   gold accent. Force the active dot to brand gold. The selectors below
-   cover BaseWeb's nested div structure and the older marker pattern. */
-[data-baseweb="radio"] [data-baseweb="checkbox"] [aria-checked="true"],
-div[role="radiogroup"] label[data-baseweb="radio"] input[type="radio"]:checked + div {{
-    background-color: var(--accent) !important;
-    border-color: var(--accent) !important;
-}}
+   gold accent. Modern Streamlit renders the radio mark as an SVG; only
+   that needs to be painted gold. The previous rules also coloured the
+   outer container rectangle, which produced a visible 'smudge' next to
+   the dot. Keep only the SVG fill. */
 [data-baseweb="radio"] svg {{
     fill: var(--accent) !important;
+    color: var(--accent) !important;
 }}
-/* The little circle marker at the centre of the dot */
+/* Defensive: kill any background bleed on the radio's outer container
+   that could re-appear with future Streamlit versions. */
+[data-baseweb="radio"] [aria-checked="true"],
+div[role="radiogroup"] label[data-baseweb="radio"] input[type="radio"]:checked + div,
 div[role="radiogroup"] label[data-baseweb="radio"] input[type="radio"]:checked + div > div {{
-    background-color: var(--bg-primary) !important;
+    background-color: transparent !important;
+    border-color: transparent !important;
+    box-shadow: none !important;
 }}
 
 /* st.slider — Streamlit's default thumb + filled track ship in coral red.
