@@ -367,8 +367,14 @@ def calculate_ratios(
 
     ebitda = _get(income, "ebitda")
     if ebitda is None:
-        # Reconstruct: EBIT + D&A
-        da = _get(cash, "depreciation_cf") or _get(income, "depreciation_inc")
+        # Reconstruct: EBIT + D&A.
+        # `_get` returns a pd.Series; using `or` triggers __bool__ which
+        # raises 'truth value of a Series is ambiguous'. Pick explicitly
+        # by None instead — cash flow first (more reliable D&A source),
+        # then income statement.
+        da = _get(cash, "depreciation_cf")
+        if da is None:
+            da = _get(income, "depreciation_inc")
         if op_inc is not None and da is not None:
             ebitda = op_inc + da
 
