@@ -1095,6 +1095,10 @@ with tab_quality:
     ev = analyze_earnings_volatility(income=inc)
     render_earnings_volatility_card(ev)
 
+    # ---- ESG scores (Finnhub) — last so it's optional in the visual hierarchy ----
+    from ui.components.esg_panel import render_esg_panel
+    render_esg_panel(active_ticker)
+
 
 # ---- Peers ----
 with tab_peers:
@@ -1181,21 +1185,28 @@ with tab_insiders:
     from ui.components.insider_panel import render_insider_panel
     from ui.components.etf_holdings_panel import render_etf_holdings_panel
     from ui.components.sec_insiders_panel import render_sec_insiders_panel
+    from ui.components.senate_trading_panel import render_senate_trading_panel
 
-    # ---- SEC EDGAR Form 4 (free, no key needed) ----
-    # Quick filings index always renders; the heavy XML parse lives behind
-    # a 'Load full insider history' button cached for 7 days.
-    render_sec_insiders_panel(active_ticker)
+    sub_corp, sub_gov = st.tabs([
+        "Corporate insiders (Form 4)", "Government trades",
+    ])
 
-    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    with sub_corp:
+        # ---- SEC EDGAR Form 4 (free, no key needed) ----
+        render_sec_insiders_panel(active_ticker)
 
-    # ---- FMP-aggregated Form 4 (when key is configured) ----
-    insider_res = analyze_insider_activity(active_ticker, months=24)
-    render_insider_panel(insider_res)
+        st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
 
-    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
-    etf_res = analyze_etf_holdings(active_ticker)
-    render_etf_holdings_panel(etf_res)
+        # ---- FMP-aggregated Form 4 (when key is configured) ----
+        insider_res = analyze_insider_activity(active_ticker, months=24)
+        render_insider_panel(insider_res)
+
+        st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+        etf_res = analyze_etf_holdings(active_ticker)
+        render_etf_holdings_panel(etf_res)
+
+    with sub_gov:
+        render_senate_trading_panel(active_ticker)
 
 
 # ---- Charts ----
