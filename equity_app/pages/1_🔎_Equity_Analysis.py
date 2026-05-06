@@ -202,9 +202,12 @@ with back_r:
         st.rerun()
 
 # Compact secondary inputs row — lets the user switch ticker without
-# returning to the landing.
+# returning to the landing. (The old comma-separated peers field has
+# been removed; peer comparison now lives in the Overview tab as the
+# Price Comparison panel — search, add, remove, time range, normalised
+# vs absolute, performance summary.)
 _LABELS: list[str] = ticker_labels(SP500_TOP)
-ic1, ic2, ic3, ic4 = st.columns([0.9, 4.0, 2.0, 1.1])
+ic1, ic2, ic3 = st.columns([0.9, 5.5, 1.4])
 with ic1:
     use_custom = st.toggle(
         "Custom", value=False,
@@ -229,12 +232,6 @@ with ic2:
         )
         ticker = ticker_from_label(chosen_label)
 with ic3:
-    peers_raw = st.text_input(
-        "Peers", value="MSFT,GOOGL,META",
-        label_visibility="collapsed",
-        placeholder="Comma-separated peers",
-    )
-with ic4:
     if st.button("Re-analyze", type="primary", use_container_width=True):
         _set_active(ticker)
         st.rerun()
@@ -621,6 +618,11 @@ with tab_overview:
         ),
         use_container_width=True, config={"displayModeBar": False},
     )
+
+    # ---- 3.5  Price comparison (replaces the old peers field) ----
+    from ui.components.price_comparison import render_price_comparison
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    render_price_comparison(active_ticker)
 
     # ---- 4. Score breakdown (Bloomberg-style 5-card grid) ----
     st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
