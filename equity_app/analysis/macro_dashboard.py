@@ -56,6 +56,18 @@ class MacroSnapshot:
     hy_ig_proxy:         Optional[float] = None    # HYG/LQD price ratio gap
     hy_ig_proxy_z:       Optional[float] = None    # z-score vs 1y
 
+    # FRED-only fields — populated when FRED_API_KEY is configured
+    fed_funds:        Optional[float] = None
+    cpi_yoy_pct:      Optional[float] = None
+    core_cpi_yoy_pct: Optional[float] = None
+    pce_yoy_pct:      Optional[float] = None
+    unemployment_pct: Optional[float] = None
+    sahm_rule:        Optional[float] = None
+    sahm_triggered:   bool = False
+    hy_spread_pct:    Optional[float] = None       # ICE BofA HY OAS, real
+
+    yield_source: str = "yfinance"   # "yfinance" | "fred"
+
     regime: MacroRegime = field(default_factory=lambda: MacroRegime(
         label="N/A", flag="unknown", score=0, reasons=[]
     ))
@@ -134,6 +146,23 @@ def _classify_regime(snap: MacroSnapshot) -> MacroRegime:
             score += 1
             reasons.append("HY/IG proxy tight — risk-on")
 
+    # Real HY OAS spread (FRED) — overrides the proxy z-score signal
+    if snap.hy_spread_pct is not None:
+        if snap.hy_spread_pct > 6.0:
+            score -= 3
+            reasons.append(f"HY OAS very wide ({snap.hy_spread_pct:.1f}pp)")
+        elif snap.hy_spread_pct < 3.0:
+            score += 1
+            reasons.append(f"HY OAS tight ({snap.hy_spread_pct:.1f}pp)")
+
+    # Sahm Rule — recession indicator from FRED. Triggered (≥0.5) is hard.
+    if snap.sahm_triggered:
+        score -= 4
+        reasons.append(f"Sahm Rule TRIGGERED ({snap.sahm_rule:.2f}) — recession likely")
+    elif snap.sahm_rule is not None and snap.sahm_rule >= 0.3:
+        score -= 1
+        reasons.append(f"Sahm Rule rising ({snap.sahm_rule:.2f})")
+
     if score >= 2:
         label, flag = "RISK-ON", "green"
     elif score >= 0:
@@ -149,19 +178,58 @@ def _classify_regime(snap: MacroSnapshot) -> MacroRegime:
 # ============================================================
 # Public API
 # ============================================================
+def _try_fred_yields(snap: MacroSnapshot) -> bool:
+    """Populate yields + macro fields from FRED. True iff any field landed."""
+    try:
+        from data import fred_provider
+    except Exception:
+        return False
+    if not fred_provider.is_available():
+        return False
+    try:
+        fred = fred_provider.macro_snapshot()
+    except Exception:
+        logger.debug("FRED snapshot failed", exc_info=True)
+        return False
+    if not fred.available:
+        return False
+
+    snap.yield_3m  = fred.yield_3m
+    snap.yield_2y  = fred.yield_2y
+    snap.yield_5y  = fred.yield_5y
+    snap.yield_10y = fred.yield_10y
+    snap.yield_30y = fred.yield_30y
+    snap.fed_funds = fred.fed_funds
+    snap.cpi_yoy_pct      = fred.cpi_yoy_pct
+    snap.core_cpi_yoy_pct = fred.core_cpi_yoy_pct
+    snap.pce_yoy_pct      = fred.pce_yoy_pct
+    snap.unemployment_pct = fred.unemployment_pct
+    snap.sahm_rule        = fred.sahm_rule
+    snap.sahm_triggered   = fred.sahm_triggered
+    snap.hy_spread_pct    = fred.hy_spread_pct
+    snap.yield_source = "fred"
+    return any(v is not None for v in (
+        snap.yield_10y, snap.cpi_yoy_pct, snap.fed_funds,
+    ))
+
+
 def get_macro_snapshot() -> MacroSnapshot:
     snap = MacroSnapshot(available=False, timestamp=pd.Timestamp.utcnow())
 
-    # CBOE / Treasury yield proxies — yfinance returns these as percentage
-    # (e.g. ^TNX = 4.32 means 4.32%).
-    snap.yield_3m  = _last_close("^IRX")
-    snap.yield_5y  = _last_close("^FVX")
-    snap.yield_10y = _last_close("^TNX")
-    snap.yield_30y = _last_close("^TYX")
-    # 2Y not directly on yfinance — fall back to a linear interp between 3M and 5Y
-    if snap.yield_3m is not None and snap.yield_5y is not None:
-        # 2Y ≈ midpoint weighted closer to 5Y on a flat curve
-        snap.yield_2y = snap.yield_3m + (snap.yield_5y - snap.yield_3m) * (21 / 60)
+    # Prefer FRED when key is configured — real CPI / PCE / Sahm rule.
+    used_fred = _try_fred_yields(snap)
+
+    if not used_fred:
+        # CBOE / Treasury yield proxies — yfinance returns these as percentage
+        # (e.g. ^TNX = 4.32 means 4.32%).
+        snap.yield_3m  = _last_close("^IRX")
+        snap.yield_5y  = _last_close("^FVX")
+        snap.yield_10y = _last_close("^TNX")
+        snap.yield_30y = _last_close("^TYX")
+        # 2Y not directly on yfinance — fall back to a linear interp between 3M and 5Y
+        if snap.yield_3m is not None and snap.yield_5y is not None:
+            # 2Y ≈ midpoint weighted closer to 5Y on a flat curve
+            snap.yield_2y = snap.yield_3m + (snap.yield_5y - snap.yield_3m) * (21 / 60)
 
     if snap.yield_10y is not None:
         if snap.yield_2y is not None:
@@ -195,16 +263,19 @@ def get_macro_snapshot() -> MacroSnapshot:
                     )
 
     snap.available = any(v is not None for v in (
-        snap.yield_10y, snap.vix, snap.dxy,
+        snap.yield_10y, snap.vix, snap.dxy, snap.cpi_yoy_pct,
     ))
 
     if not snap.available:
-        snap.note = ("yfinance returned no data for any macro symbol — "
-                     "rate-limited or offline. Try again in a minute.")
+        snap.note = ("Neither FRED nor yfinance returned data — rate-limited "
+                     "or offline. Try again in a minute.")
+    elif snap.yield_source == "fred":
+        snap.note = ("Yields + inflation + Sahm Rule from FRED (live). "
+                     "VIX / DXY / HY-IG ratio still from yfinance.")
     else:
-        snap.note = ("Yields are CBOE-quoted percentage points. 2Y is "
-                     "interpolated (no native yfinance symbol). For CPI / "
-                     "PCE / Sahm rule wire FRED.")
+        snap.note = ("Yields are CBOE-quoted percentage points from yfinance. "
+                     "2Y is interpolated (no native yfinance symbol). "
+                     "Wire FRED to get real CPI / PCE / Sahm Rule.")
 
     snap.regime = _classify_regime(snap)
     return snap

@@ -21,8 +21,12 @@ env/
 .data/
 *.db
 
-# Secrets
+# Secrets — never commit any of these
 .env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+secrets.toml
 
 # IDE
 .vscode/

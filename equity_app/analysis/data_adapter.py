@@ -136,6 +136,82 @@ def _from_yfinance(ticker: str) -> Optional[FinancialsBundle]:
     )
 
 
+_SEC_TO_CAMEL = {
+    # Income
+    "revenue":              "revenue",
+    "cost_of_revenue":      "costOfRevenue",
+    "gross_profit":         "grossProfit",
+    "operating_income":     "operatingIncome",
+    "net_income":           "netIncome",
+    "eps_basic":            "eps",
+    "eps_diluted":          "epsdiluted",
+    "shares_diluted":       "weightedAverageShsOut",
+    "shares_basic":         "weightedAverageShsOutBasic",
+    "tax_expense":          "incomeTaxExpense",
+    "interest_expense":     "interestExpense",
+    # Balance
+    "total_assets":         "totalAssets",
+    "current_assets":       "totalCurrentAssets",
+    "cash":                 "cashAndCashEquivalents",
+    "short_term_investments": "shortTermInvestments",
+    "receivables":          "netReceivables",
+    "inventory":            "inventory",
+    "ppe_net":              "propertyPlantEquipmentNet",
+    "goodwill":             "goodwill",
+    "intangibles":          "intangibleAssets",
+    "total_liabilities":    "totalLiabilities",
+    "current_liabilities":  "totalCurrentLiabilities",
+    "accounts_payable":     "accountsPayable",
+    "long_term_debt":       "longTermDebt",
+    "total_debt":           "totalDebt",
+    "stockholders_equity":  "totalStockholdersEquity",
+    "shares_outstanding":   "commonStockSharesOutstanding",
+    # Cash flow
+    "operating_cash_flow":  "operatingCashFlow",
+    "investing_cash_flow":  "investingCashFlow",
+    "financing_cash_flow":  "financingCashFlow",
+    "capex":                "capitalExpenditure",
+    "depreciation":         "depreciationAndAmortization",
+    "dividends_paid":       "dividendsPaid",
+    "stock_repurchased":    "commonStockRepurchased",
+    "stock_issued":         "commonStockIssued",
+}
+
+
+def _sec_df_to_camelcase(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename SEC EDGAR snake_case cols to FMP camelCase + drop bookkeeping."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.drop(columns=["period", "form"], errors="ignore")
+    return df.rename(columns={k: v for k, v in _SEC_TO_CAMEL.items()
+                              if k in df.columns})
+
+
+def _from_sec(ticker: str) -> Optional[FinancialsBundle]:
+    """SEC EDGAR — official US-listed financials, no key needed."""
+    try:
+        from data.edgar_provider import extract_financials
+    except Exception:
+        return None
+    try:
+        bundle = extract_financials(ticker, freq="annual")
+    except Exception:
+        return None
+    income  = _sec_df_to_camelcase(bundle.get("income", pd.DataFrame()))
+    balance = _sec_df_to_camelcase(bundle.get("balance", pd.DataFrame()))
+    cash    = _sec_df_to_camelcase(bundle.get("cashflow", pd.DataFrame()))
+    if income.empty and balance.empty and cash.empty:
+        return None
+    return FinancialsBundle(
+        income=income, balance=balance, cash=cash, source="fmp",
+        # We label the source 'fmp' so downstream FMP-shape readers don't
+        # have to special-case 'sec'. The actual provenance is exposed in
+        # the bundle's note field.
+        note=("Source: SEC EDGAR XBRL (Company Facts). "
+              "Official annual filings — coverage from 1993+ for many filers."),
+    )
+
+
 def _from_fmp(ticker: str) -> Optional[FinancialsBundle]:
     """Use the existing FMPProvider class. Returns None when the key
     isn't set or the request fails — the caller will fall through to
@@ -164,12 +240,13 @@ def _from_fmp(ticker: str) -> Optional[FinancialsBundle]:
 # ============================================================
 # Public API
 # ============================================================
-def _preferred_source() -> SourceName:
+def _preferred_source() -> str:
+    """`'sec'` is preferred when the env hints at it. Returns one of
+    'fixtures' / 'yfinance' / 'fmp' / 'sec'. Resolution chain in
+    ``get_financials`` uses this only as a hint about ordering."""
     src = os.environ.get("EQUITY_APP_DATA_SOURCE", "fixtures").lower()
-    if src == "fmp":
-        return "fmp"
-    if src == "yfinance":
-        return "yfinance"
+    if src in ("sec", "fmp", "yfinance", "fixtures"):
+        return src
     return "fixtures"
 
 
@@ -190,10 +267,12 @@ def get_financials(ticker: str) -> Optional[FinancialsBundle]:
         return fixture
 
     source = _preferred_source()
-    chain = (
-        [_from_fmp, _from_yfinance] if source == "fmp"
-        else [_from_yfinance, _from_fmp]
-    )
+    if source == "sec":
+        chain = [_from_sec, _from_fmp, _from_yfinance]
+    elif source == "fmp":
+        chain = [_from_fmp, _from_sec, _from_yfinance]
+    else:
+        chain = [_from_yfinance, _from_sec, _from_fmp]
     for fn in chain:
         bundle = fn(ticker)
         if bundle is not None:

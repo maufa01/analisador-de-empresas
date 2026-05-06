@@ -176,5 +176,41 @@ def render_macro_panel(snap: MacroSnapshot) -> None:
 
     c4.metric("REGIME SCORE", f"{snap.regime.score:+d}")
 
+    # ---- FRED block (inflation + Sahm Rule + Fed funds) ----
+    has_fred = any(v is not None for v in (
+        snap.cpi_yoy_pct, snap.pce_yoy_pct, snap.sahm_rule, snap.fed_funds,
+    ))
+    if has_fred:
+        st.markdown(
+            '<div class="eq-section-label" style="margin-top:14px;">'
+            'INFLATION · LABOUR · CREDIT · LIVE FROM FRED</div>',
+            unsafe_allow_html=True,
+        )
+        f1, f2, f3, f4 = st.columns(4, gap="small")
+        f1.metric("CPI YoY", _fmt_pct(snap.cpi_yoy_pct))
+        f2.metric("CORE CPI YoY", _fmt_pct(snap.core_cpi_yoy_pct))
+        f3.metric("PCE YoY", _fmt_pct(snap.pce_yoy_pct))
+        f4.metric("FED FUNDS", _fmt_pct(snap.fed_funds))
+
+        f5, f6, f7, _ = st.columns(4, gap="small")
+        f5.metric("UNEMPLOYMENT", _fmt_pct(snap.unemployment_pct))
+
+        # Sahm Rule with explicit triggered indicator
+        if snap.sahm_rule is not None:
+            sahm_helper = "TRIGGERED" if snap.sahm_triggered else "below 0.50"
+            f6.metric("SAHM RULE", f"{snap.sahm_rule:.2f}", sahm_helper)
+        else:
+            f6.metric("SAHM RULE", "—")
+
+        if snap.hy_spread_pct is not None:
+            hy_helper = (
+                "wide — risk-off" if snap.hy_spread_pct > 6.0
+                else "tight — risk-on" if snap.hy_spread_pct < 3.0
+                else "normal"
+            )
+            f7.metric("HY OAS", _fmt_pct(snap.hy_spread_pct), hy_helper)
+        else:
+            f7.metric("HY OAS", "—")
+
     if snap.note:
         st.caption(snap.note)
