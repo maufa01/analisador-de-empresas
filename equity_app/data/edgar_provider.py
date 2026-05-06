@@ -569,3 +569,284 @@ def get_13f_filings_for_cik(cik: str, *, limit: int = 12) -> pd.DataFrame:
 def is_available() -> bool:
     """SEC EDGAR has no key — always available as long as we can reach it."""
     return True
+
+
+# ============================================================
+# Form 4 — quick summary (NO XML parse) vs full parse
+# ============================================================
+def get_insider_filings_summary(ticker: str, *, months: int = 24) -> dict:
+    """
+    QUICK summary — only the filings index, no per-filing XML downloads.
+    Costs 1 SEC request (the /submissions endpoint).
+
+    Returns:
+        total_filings, last_filing_date, last_30d_count, filings_list (DataFrame)
+    """
+    filings = get_filings_list(ticker, form_types=["4"])
+    if filings.empty:
+        return {
+            "total_filings":     0,
+            "last_filing_date":  None,
+            "last_30d_count":    0,
+            "filings_list":      pd.DataFrame(),
+        }
+
+    cutoff = pd.Timestamp.now() - pd.DateOffset(months=months)
+    recent = filings[filings["filing_date"] >= cutoff]
+    last_30d = filings[filings["filing_date"]
+                       >= (pd.Timestamp.now() - pd.Timedelta(days=30))]
+
+    last_date = (recent["filing_date"].max().strftime("%Y-%m-%d")
+                 if not recent.empty else None)
+    return {
+        "total_filings":     int(len(recent)),
+        "last_filing_date":  last_date,
+        "last_30d_count":    int(len(last_30d)),
+        "filings_list":      recent.reset_index(drop=True),
+    }
+
+
+def fetch_form4_xml_for_filing(ticker: str, accession_number: str,
+                                primary_document: str) -> Optional[Form4Filing]:
+    """
+    Download + parse a single Form 4 XML.
+
+    Form 4 ships as either an HTML primary doc with a sibling XML, or as
+    the XML directly. We try the XML companion first (the canonical path
+    SEC documents), then fall back to listing the accession folder.
+    """
+    cik = get_cik_for_ticker(ticker)
+    if not cik:
+        return None
+    accession_clean = accession_number.replace("-", "")
+    cik_int = int(cik)
+
+    # Most Form 4 packages include a primary XML doc named like
+    # "edgar/data/.../xslF345X05/wf-form4_*.xml" or just "xxx.xml".
+    # The fastest reliable path is the index JSON which lists every
+    # file in the package.
+    index_url = (f"https://www.sec.gov/cgi-bin/browse-edgar"
+                 f"?action=getcompany&CIK={cik_int}"
+                 f"&type=4&dateb=&owner=include&count=40")
+    # Cheaper alternative: the per-accession index JSON
+    folder_url = (f"https://www.sec.gov/Archives/edgar/data/"
+                  f"{cik_int}/{accession_clean}/")
+    folder_index_url = folder_url + "index.json"
+
+    idx = _sec_get(folder_index_url)
+    xml_name: Optional[str] = None
+    if isinstance(idx, dict):
+        items = idx.get("directory", {}).get("item", [])
+        # Prefer files matching wf-form4 / form4
+        for it in items:
+            name = it.get("name", "")
+            lname = name.lower()
+            if lname.endswith(".xml") and ("form4" in lname or "primary_doc" in lname):
+                xml_name = name
+                break
+        if xml_name is None:
+            for it in items:
+                name = it.get("name", "")
+                if name.lower().endswith(".xml"):
+                    xml_name = name
+                    break
+
+    if not xml_name:
+        return None
+
+    xml_url = folder_url + xml_name
+    xml_text = _sec_get_text(xml_url)
+    if not xml_text:
+        return None
+
+    return parse_form4_xml(xml_text)
+
+
+def _cached_or_passthrough(prefix: str, ttl_sec: int):
+    """Decorate with the project disk cache when available; pass through
+    if the cache module fails to import (e.g. local CI without diskcache)."""
+    try:
+        from data.cache import cached as _cached
+        return _cached(prefix, ttl_sec)
+    except Exception:
+        def passthrough(fn):
+            return fn
+        return passthrough
+
+
+@_cached_or_passthrough("sec_form4_full", ttl_sec=7 * 24 * 3600)
+def fetch_full_insider_history_cached(
+    ticker: str, *, months: int = 24, max_filings: int = 50,
+) -> pd.DataFrame:
+    """Cached wrapper — same as ``fetch_full_insider_history`` but no
+    progress callback (caching pickling can't serialise a callback)."""
+    return fetch_full_insider_history(
+        ticker, months=months, max_filings=max_filings, progress_callback=None,
+    )
+
+
+@_cached_or_passthrough("sec_13f_holdings", ttl_sec=7 * 24 * 3600)
+def fetch_full_13f_holdings_cached(investor_key: str, *,
+                                    which: str = "latest") -> pd.DataFrame:
+    return fetch_full_13f_holdings(investor_key, which=which)
+
+
+def fetch_full_insider_history(
+    ticker: str, *,
+    months: int = 24,
+    max_filings: int = 50,
+    progress_callback=None,
+) -> pd.DataFrame:
+    """
+    HEAVY: parses every Form 4 XML for ``ticker`` over the period.
+
+    Cost: ``2 * min(N, max_filings) + 1`` SEC requests (one for the
+    folder index per filing, one for the XML, one for the filings index).
+
+    Returns a DataFrame with one row per non-derivative transaction:
+        transaction_date, owner, relationship, transaction_code,
+        shares, price, value, acquired_disposed, shares_after, filing_date
+
+    Use ``get_insider_filings_summary`` first to estimate cost; gate
+    this behind an explicit user click.
+    """
+    summary = get_insider_filings_summary(ticker, months=months)
+    filings = summary["filings_list"].head(max_filings)
+    if filings.empty:
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    total = len(filings)
+    for i, (_, f) in enumerate(filings.iterrows()):
+        if progress_callback is not None:
+            try:
+                progress_callback(i + 1, total)
+            except Exception:
+                pass
+        parsed = fetch_form4_xml_for_filing(
+            ticker, f["accession_number"], f.get("primary_document", ""),
+        )
+        if parsed is None:
+            continue
+        owner = parsed.owner_name
+        rel_str = "; ".join(parsed.relationships) if parsed.relationships else ""
+        for tx in parsed.transactions:
+            value = (
+                (tx.shares or 0) * (tx.price or 0)
+                if (tx.shares is not None and tx.price is not None) else None
+            )
+            rows.append({
+                "transaction_date":  tx.transaction_date,
+                "owner":             owner,
+                "relationship":      rel_str,
+                "transaction_code":  tx.transaction_code,
+                "security_title":    tx.security_title,
+                "shares":            tx.shares,
+                "price":             tx.price,
+                "value":             value,
+                "acquired_disposed": tx.acquired_disposed,
+                "shares_after":      tx.shares_after,
+                "filing_date":       f["filing_date"],
+            })
+
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["transaction_date"] = pd.to_datetime(df["transaction_date"], errors="coerce")
+    df["filing_date"] = pd.to_datetime(df["filing_date"], errors="coerce")
+    return df.sort_values("transaction_date", ascending=False, na_position="last").reset_index(drop=True)
+
+
+# ============================================================
+# 13F — quick summary + holdings parser
+# ============================================================
+def get_13f_summary_for_investor(investor_key: str) -> dict:
+    """Quick: list of 13F-HR filings for one famous investor, no holdings parse."""
+    if investor_key not in FAMOUS_INVESTORS:
+        return {"available": False, "note": f"Unknown investor: {investor_key}"}
+    info = FAMOUS_INVESTORS[investor_key]
+    filings = get_13f_filings_for_cik(info["cik"], limit=12)
+    return {
+        "available":         True,
+        "investor_key":      investor_key,
+        "investor_name":     info["name"],
+        "cik":               info["cik"],
+        "total_filings":     int(len(filings)),
+        "last_filing_date":  filings["filing_date"].max() if not filings.empty else None,
+        "filings":           filings,
+    }
+
+
+def fetch_13f_holdings_xml(cik: str, accession_number: str) -> list[Holding13F]:
+    """Download + parse the InfoTable XML for a single 13F-HR accession."""
+    if not cik:
+        return []
+    accession_clean = accession_number.replace("-", "")
+    cik_int = int(cik)
+    folder_url = (f"https://www.sec.gov/Archives/edgar/data/"
+                  f"{cik_int}/{accession_clean}/")
+    idx = _sec_get(folder_url + "index.json")
+
+    xml_name: Optional[str] = None
+    if isinstance(idx, dict):
+        items = idx.get("directory", {}).get("item", [])
+        # Prefer infoTable.xml — that's the holdings table
+        for it in items:
+            name = (it.get("name") or "")
+            if name.lower().endswith(".xml") and "infotable" in name.lower():
+                xml_name = name
+                break
+        if xml_name is None:
+            for it in items:
+                name = (it.get("name") or "")
+                if name.lower().endswith(".xml"):
+                    xml_name = name
+                    break
+    if not xml_name:
+        return []
+
+    xml_text = _sec_get_text(folder_url + xml_name)
+    return parse_13f_xml(xml_text)
+
+
+def fetch_full_13f_holdings(investor_key: str, *,
+                             which: str = "latest") -> pd.DataFrame:
+    """
+    HEAVY: parses one 13F-HR filing's InfoTable XML.
+
+    ``which`` = "latest" (default) or an accession number. One filing's
+    XML can contain hundreds of holdings, so this is a single request
+    that returns potentially huge data — perfect for a user-gated load.
+    """
+    if investor_key not in FAMOUS_INVESTORS:
+        return pd.DataFrame()
+    cik = FAMOUS_INVESTORS[investor_key]["cik"]
+    filings = get_13f_filings_for_cik(cik, limit=12)
+    if filings.empty:
+        return pd.DataFrame()
+
+    if which == "latest":
+        accession = filings.iloc[0]["accession_number"]
+    else:
+        accession = which
+
+    holdings = fetch_13f_holdings_xml(cik, accession)
+    if not holdings:
+        return pd.DataFrame()
+
+    rows = []
+    for h in holdings:
+        rows.append({
+            "name_of_issuer": h.name_of_issuer,
+            "cusip":          h.cusip,
+            "value_usd":      h.value_usd,
+            "shares":         h.shares,
+            "share_type":     h.share_type,
+        })
+    df = pd.DataFrame(rows)
+    if "value_usd" in df.columns:
+        total_val = df["value_usd"].dropna().sum()
+        if total_val > 0:
+            df["weight_pct"] = (df["value_usd"] / total_val * 100).round(2)
+        df = df.sort_values("value_usd", ascending=False, na_position="last")
+    return df.reset_index(drop=True)

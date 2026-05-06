@@ -1156,7 +1156,16 @@ with tab_insiders:
     from analysis.etf_analysis import analyze_etf_holdings
     from ui.components.insider_panel import render_insider_panel
     from ui.components.etf_holdings_panel import render_etf_holdings_panel
+    from ui.components.sec_insiders_panel import render_sec_insiders_panel
 
+    # ---- SEC EDGAR Form 4 (free, no key needed) ----
+    # Quick filings index always renders; the heavy XML parse lives behind
+    # a 'Load full insider history' button cached for 7 days.
+    render_sec_insiders_panel(active_ticker)
+
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+
+    # ---- FMP-aggregated Form 4 (when key is configured) ----
     insider_res = analyze_insider_activity(active_ticker, months=24)
     render_insider_panel(insider_res)
 
