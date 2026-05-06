@@ -120,5 +120,58 @@ def fetch_news_sentiment(ticker: str) -> dict:
     return _get("news-sentiment", {"symbol": ticker})
 
 
+def fetch_earnings_calendar(ticker: str, *,
+                            from_date: Optional[str] = None,
+                            to_date: Optional[str] = None) -> pd.DataFrame:
+    """Upcoming earnings dates + EPS estimates."""
+    from datetime import datetime, timedelta
+    if from_date is None:
+        from_date = datetime.utcnow().date().isoformat()
+    if to_date is None:
+        to_date = (datetime.utcnow().date() + timedelta(days=90)).isoformat()
+    payload = _get("calendar/earnings", {
+        "symbol": ticker, "from": from_date, "to": to_date,
+    })
+    rows = payload.get("earningsCalendar") if isinstance(payload, dict) else None
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.sort_values("date", ascending=True, na_position="last")
+    return df.reset_index(drop=True)
+
+
+def fetch_price_target(ticker: str) -> dict:
+    """Wall Street consensus price target (mean / high / low / num analysts)."""
+    return _get("stock/price-target", {"symbol": ticker})
+
+
+def fetch_senate_trading(ticker: str) -> pd.DataFrame:
+    """Congressional trading filings for the ticker (US politicians)."""
+    payload = _get("stock/congressional-trading", {"symbol": ticker})
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    for col in ("transactionDate", "filingDate"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    if "transactionDate" in df.columns:
+        df = df.sort_values("transactionDate", ascending=False, na_position="last")
+    return df.reset_index(drop=True)
+
+
+def fetch_esg_scores(ticker: str) -> dict:
+    """ESG scores: total + environment + social + governance."""
+    return _get("stock/esg", {"symbol": ticker})
+
+
+def fetch_basic_financials(ticker: str) -> dict:
+    """All metrics endpoint — returns {'metric': {...}} with TTM ratios.
+    Useful as a fallback when yfinance is missing a specific metric."""
+    return _get("stock/metric", {"symbol": ticker, "metric": "all"})
+
+
 def is_available() -> bool:
     return bool(_api_key())

@@ -416,6 +416,10 @@ st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
 # ---- Overview ----
 with tab_overview:
+    # ---- Next earnings card (Finnhub, only if ≤60 days away) ----
+    from ui.components.next_earnings_card import render_next_earnings_card
+    render_next_earnings_card(active_ticker, horizon_days=60)
+
     # ---- 1. Returns row (vs S&P 500 benchmark) ----
     from data.market_data import get_ticker_history
     from ui.components.returns_table import (
@@ -813,6 +817,19 @@ with tab_valuation:
                 "Share of EV": st.column_config.NumberColumn(format="%.1f%%"),
             },
         )
+
+    # Wall Street consensus (Finnhub) — recommendation distribution +
+    # price target with divergence vs the aggregator.
+    from ui.components.analyst_consensus_panel import render_analyst_consensus_panel
+    aggregator_intr = (results.aggregator.intrinsic_per_share
+                        if results.aggregator and np.isfinite(
+                            results.aggregator.intrinsic_per_share
+                        ) else None)
+    render_analyst_consensus_panel(
+        active_ticker,
+        aggregator_intrinsic=aggregator_intr,
+        current_price=current_price,
+    )
 
     # Reverse DCF — what growth justifies the current price?
     if current_price and current_price > 0 and results.dcf is not None:
