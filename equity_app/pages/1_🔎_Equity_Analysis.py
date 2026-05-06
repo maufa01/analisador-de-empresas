@@ -587,8 +587,8 @@ with tab_overview:
     st.plotly_chart(
         build_football_field_figure(
             results,
-            week52_low=w52[0] if w52 else None,
-            week52_high=w52[1] if w52 else None,
+            week52_low=w52_low,
+            week52_high=w52_high,
             height=360,
         ),
         use_container_width=True, config={"displayModeBar": False},
