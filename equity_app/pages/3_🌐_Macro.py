@@ -39,8 +39,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_macro, tab_alerts, tab_supers = st.tabs([
-    "Macro overlay", "Watchlist alerts", "Superinvestors",
+tab_macro, tab_alerts, tab_supers, tab_diag = st.tabs([
+    "Macro overlay", "Watchlist alerts", "Superinvestors", "Diagnostics",
 ])
 
 with tab_macro:
@@ -53,3 +53,7 @@ with tab_alerts:
 
 with tab_supers:
     render_superinvestors_panel()
+
+with tab_diag:
+    from ui.components.diagnostic_panel import render_diagnostic_panel
+    render_diagnostic_panel()

@@ -384,6 +384,31 @@ render_ticker_header(
                 if results.aggregator else None),
 )
 
+# ---- Data-provenance strip — make it impossible to confuse fixture
+#      data with live data again. Shows which provider fed each major
+#      block plus how fresh the price quote is.
+from ui.components.data_source_badge import source_chip
+_price_chip = source_chip(
+    live_quote.get("source", "—"),
+    fetched_at=live_quote.get("fetched_at"),
+    is_realtime=bool(live_quote.get("is_realtime")),
+)
+_info_chip = source_chip(live_info.get("source", "—"))
+_fin_chip = source_chip(bundle.source if bundle else "—")
+st.markdown(
+    '<div style="display:flex; gap:18px; flex-wrap:wrap; '
+    'margin:6px 0 14px 0; padding:8px 14px; background:var(--surface); '
+    'border:1px solid var(--border); border-radius:6px;">'
+    f'<span style="color:var(--text-muted); font-size:10px; '
+    f'letter-spacing:0.5px;">PRICE {_price_chip}</span>'
+    f'<span style="color:var(--text-muted); font-size:10px; '
+    f'letter-spacing:0.5px;">COMPANY INFO {_info_chip}</span>'
+    f'<span style="color:var(--text-muted); font-size:10px; '
+    f'letter-spacing:0.5px;">FINANCIALS {_fin_chip}</span>'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
 
 # ============================================================
 # 2.5 — Company profile + Competitive landscape

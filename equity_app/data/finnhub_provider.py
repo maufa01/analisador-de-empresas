@@ -34,31 +34,60 @@ def _api_key() -> str:
 
 
 def _get(endpoint: str, params: Optional[dict] = None) -> Any:
-    """Returns parsed JSON or {} on any failure."""
+    """Returns parsed JSON or {} on any failure. Logged via api_logger."""
+    import time as _time
+    try:
+        from utils.api_logger import log_api_request as _log
+    except Exception:
+        def _log(**kw): return None  # type: ignore[no-redef]
+
+    ticker_arg = (params or {}).get("symbol") or (params or {}).get("symbols")
     key = _api_key()
     if not key:
+        _log(provider="finnhub", endpoint=endpoint, ticker=ticker_arg,
+             success=False, error="no_api_key")
         return {}
     try:
         import requests  # type: ignore
     except ImportError:
+        _log(provider="finnhub", endpoint=endpoint, ticker=ticker_arg,
+             success=False, error="requests_not_installed")
         return {}
 
     full = dict(params or {})
     full["token"] = key
+    t0 = _time.monotonic()
     try:
         r = requests.get(f"{_BASE_URL}/{endpoint}", params=full, timeout=15)
     except Exception as e:
+        elapsed = int((_time.monotonic() - t0) * 1000)
+        _log(provider="finnhub", endpoint=endpoint, ticker=ticker_arg,
+             success=False, response_time_ms=elapsed,
+             error=f"{type(e).__name__}: {e}")
         logger.debug(f"Finnhub request failed for {endpoint}: {e}")
         return {}
+    elapsed = int((_time.monotonic() - t0) * 1000)
     if r.status_code == 429:
+        _log(provider="finnhub", endpoint=endpoint, ticker=ticker_arg,
+             success=False, response_time_ms=elapsed, error="429 rate-limit")
         logger.warning("Finnhub rate-limited — backing off this call")
         return {}
     if r.status_code != 200:
+        _log(provider="finnhub", endpoint=endpoint, ticker=ticker_arg,
+             success=False, response_time_ms=elapsed,
+             error=f"HTTP {r.status_code}")
         return {}
     try:
-        return r.json()
+        out = r.json()
     except ValueError:
+        _log(provider="finnhub", endpoint=endpoint, ticker=ticker_arg,
+             success=False, response_time_ms=elapsed, error="invalid_json")
         return {}
+    summary = (f"200 OK · {len(out)} keys" if isinstance(out, dict)
+               else f"200 OK · {len(out) if hasattr(out, '__len__') else '?'} items")
+    _log(provider="finnhub", endpoint=endpoint, ticker=ticker_arg,
+         success=True, response_time_ms=elapsed, response_summary=summary)
+    return out
 
 
 # ============================================================
