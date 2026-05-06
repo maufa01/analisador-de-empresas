@@ -65,6 +65,27 @@ def _label(text: str, *, modified: bool = False) -> str:
     return f"{text}{_DOT if modified else ''}"
 
 
+def _safe_default(value, min_val: float, max_val: float,
+                   *, fallback: Optional[float] = None) -> float:
+    """Clamp ``value`` into ``[min_val, max_val]``, with a fallback for
+    NaN / None / out-of-range. Streamlit's ``st.number_input`` and
+    ``st.slider`` raise ``StreamlitValueAboveMaxError`` (or below-min)
+    when the *initial* ``value=`` falls outside its range — common when
+    a default is computed from a volatile ticker (e.g. revenue σ for
+    NVDA can exceed 0.50).
+    """
+    import math
+    if value is None:
+        return float(fallback if fallback is not None else min_val)
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return float(fallback if fallback is not None else min_val)
+    if math.isnan(v) or math.isinf(v):
+        return float(fallback if fallback is not None else min_val)
+    return float(max(min_val, min(v, max_val)))
+
+
 def _live_wacc(a: Assumptions) -> Optional[float]:
     try:
         w = calculate_wacc(
@@ -234,7 +255,8 @@ def render_assumptions_panel(
             new_rf = st.slider(
                 _label("rf", modified="risk_free" in diff),
                 min_value=0.01, max_value=0.08,
-                value=float(current.risk_free), step=0.0025,
+                value=_safe_default(current.risk_free, 0.01, 0.08, fallback=0.045),
+                step=0.0025,
                 format="%.4f", label_visibility="collapsed",
                 key=f"rf_{ticker}",
             )
@@ -251,7 +273,8 @@ def render_assumptions_panel(
             new_erp = st.slider(
                 _label("erp", modified="equity_risk_premium" in diff),
                 min_value=0.03, max_value=0.08,
-                value=float(current.equity_risk_premium), step=0.0025,
+                value=_safe_default(current.equity_risk_premium, 0.03, 0.08, fallback=0.055),
+                step=0.0025,
                 format="%.4f", label_visibility="collapsed",
                 key=f"erp_{ticker}",
             )
@@ -270,7 +293,8 @@ def render_assumptions_panel(
             new_g_t = st.slider(
                 _label("gt", modified="terminal_growth" in diff),
                 min_value=0.005, max_value=0.045,
-                value=float(current.terminal_growth), step=0.0025,
+                value=_safe_default(current.terminal_growth, 0.005, 0.045, fallback=0.025),
+                step=0.0025,
                 format="%.4f", label_visibility="collapsed",
                 key=f"gt_{ticker}",
             )
@@ -298,11 +322,13 @@ def render_assumptions_panel(
             new_g1 = 0.0
             st.caption("Stage-1 growth derived from realised FCF CAGR (clipped to ±30%).")
         else:
-            seed = float(current.override_growth) if current.override_growth != 0.0 else 0.05
+            seed = (float(current.override_growth)
+                    if current.override_growth != 0.0 else 0.05)
             new_g1 = st.slider(
                 _label("Custom stage-1 growth (annualised)",
                        modified="override_growth" in diff),
-                min_value=-0.05, max_value=0.30, value=seed,
+                min_value=-0.05, max_value=0.30,
+                value=_safe_default(seed, -0.05, 0.30, fallback=0.05),
                 step=0.0025, format="%.4f",
                 key=f"gov_{ticker}",
             )
@@ -312,14 +338,16 @@ def render_assumptions_panel(
             new_s1 = int(st.slider(
                 _label("High-growth period (years)",
                        modified="stage1_years" in diff),
-                min_value=2, max_value=10, value=int(current.stage1_years),
+                min_value=2, max_value=10,
+                value=int(_safe_default(current.stage1_years, 2, 10, fallback=5)),
                 step=1, key=f"s1_{ticker}",
             ))
         with h2:
             new_s2 = int(st.slider(
                 _label("Fade period (years)",
                        modified="stage2_years" in diff),
-                min_value=0, max_value=10, value=int(current.stage2_years),
+                min_value=0, max_value=10,
+                value=int(_safe_default(current.stage2_years, 0, 10, fallback=5)),
                 step=1, key=f"s2_{ticker}",
             ))
 
@@ -339,7 +367,8 @@ def render_assumptions_panel(
             with c1:
                 new_beta = st.number_input(
                     _label("Beta", modified="beta" in diff),
-                    value=float(current.beta), min_value=0.30, max_value=2.50,
+                    value=_safe_default(current.beta, 0.30, 2.50, fallback=1.0),
+                    min_value=0.30, max_value=2.50,
                     step=0.05, format="%.2f",
                     key=f"beta_{ticker}",
                 )
@@ -347,7 +376,7 @@ def render_assumptions_panel(
                 new_cod = st.number_input(
                     _label("Cost of debt (pre-tax)",
                            modified="cost_of_debt" in diff),
-                    value=float(current.cost_of_debt),
+                    value=_safe_default(current.cost_of_debt, 0.005, 0.10, fallback=0.04),
                     min_value=0.005, max_value=0.10,
                     step=0.0025, format="%.4f",
                     key=f"cod_{ticker}",
@@ -355,7 +384,7 @@ def render_assumptions_panel(
             with c3:
                 new_tax = st.number_input(
                     _label("Tax rate", modified="tax_rate" in diff),
-                    value=float(current.tax_rate),
+                    value=_safe_default(current.tax_rate, 0.0, 0.45, fallback=0.21),
                     min_value=0.0, max_value=0.45,
                     step=0.005, format="%.4f",
                     key=f"tax_{ticker}",
@@ -366,7 +395,7 @@ def render_assumptions_panel(
             new_we = st.slider(
                 _label("Equity weight", modified="weight_equity" in diff),
                 min_value=0.05, max_value=0.99,
-                value=float(current.weight_equity),
+                value=_safe_default(current.weight_equity, 0.05, 0.99, fallback=0.7),
                 step=0.01, format="%.2f",
                 key=f"we_{ticker}",
             )
@@ -394,32 +423,43 @@ def render_assumptions_panel(
                 new_n = int(st.slider(
                     _label("Simulations", modified="mc_n_simulations" in diff),
                     min_value=500, max_value=20_000,
-                    value=int(current.mc_n_simulations), step=500,
+                    value=int(_safe_default(current.mc_n_simulations,
+                                            500, 20_000, fallback=10_000)),
+                    step=500,
                     key=f"mcn_{ticker}",
                 ))
+                # max raised from 0.30 → 1.0 because high-growth tickers
+                # (NVDA, TSLA, recent IPOs) routinely show revenue σ > 50%.
                 new_revstd = st.number_input(
                     _label("Revenue growth σ",
                            modified="mc_rev_growth_std" in diff),
-                    value=float(current.mc_rev_growth_std),
-                    min_value=0.005, max_value=0.30,
+                    value=_safe_default(current.mc_rev_growth_std,
+                                        0.005, 1.0, fallback=0.10),
+                    min_value=0.005, max_value=1.0,
                     step=0.005, format="%.4f",
                     key=f"mcrs_{ticker}",
+                    help=(f"Historical default: {current.mc_rev_growth_std*100:.1f}%"
+                          if current.mc_rev_growth_std else "No historical data"),
                 )
             with m2:
                 new_wstd = st.number_input(
                     _label("WACC σ", modified="mc_wacc_std" in diff),
-                    value=float(current.mc_wacc_std),
+                    value=_safe_default(current.mc_wacc_std,
+                                        0.0005, 0.020, fallback=0.005),
                     min_value=0.0005, max_value=0.020,
                     step=0.0005, format="%.4f",
                     key=f"mcws_{ticker}",
                 )
+                band_lo = _safe_default(current.mc_terminal_low, 0.0, 0.06, fallback=0.015)
+                band_hi = _safe_default(current.mc_terminal_high, 0.0, 0.06, fallback=0.035)
+                if band_lo > band_hi:
+                    band_lo, band_hi = band_hi, band_lo
                 band = st.slider(
                     _label("Terminal growth band",
                            modified=("mc_terminal_low" in diff
                                      or "mc_terminal_high" in diff)),
                     min_value=0.0, max_value=0.06,
-                    value=(float(current.mc_terminal_low),
-                           float(current.mc_terminal_high)),
+                    value=(band_lo, band_hi),
                     step=0.0025, format="%.3f",
                     key=f"mctb_{ticker}",
                 )
