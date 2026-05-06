@@ -576,20 +576,27 @@ with tab_overview:
     div_res = analyze_dividend_safety(income=inc, balance=bal, cash=cf)
     render_dividend_safety_card(div_res)
 
-    # ---- News sentiment (yfinance + VADER, opt-in FinBERT) ----
-    from analysis.news_sentiment import analyze_ticker_news
-    from ui.components.news_sentiment_panel import render_news_sentiment_panel
+    # ---- News & Sentiment — Marketaux articles + Finnhub insider/analyst ----
+    from ui.components.news_combined_section import render_news_combined_section
 
     st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
-    engine_label = st.radio(
-        "sentiment_engine",
-        options=["VADER (fast)", "FinBERT (heavy, finance-tuned)"],
-        index=0, horizontal=True, label_visibility="collapsed",
-        key=f"sent_engine_{active_ticker}",
-    )
-    engine = "finbert" if engine_label.startswith("FinBERT") else "vader"
-    news_res = analyze_ticker_news(active_ticker, limit=30, engine=engine)
-    render_news_sentiment_panel(news_res)
+    render_news_combined_section(active_ticker)
+
+    # ---- Legacy yfinance + VADER fallback ----
+    # Keeps working when no Marketaux key — cheap headline-only sentiment.
+    with st.expander("Headline-only sentiment (yfinance + VADER fallback)",
+                     expanded=False):
+        from analysis.news_sentiment import analyze_ticker_news
+        from ui.components.news_sentiment_panel import render_news_sentiment_panel
+        engine_label = st.radio(
+            "sentiment_engine",
+            options=["VADER (fast)", "FinBERT (heavy, finance-tuned)"],
+            index=0, horizontal=True, label_visibility="collapsed",
+            key=f"sent_engine_{active_ticker}",
+        )
+        engine = "finbert" if engine_label.startswith("FinBERT") else "vader"
+        news_res = analyze_ticker_news(active_ticker, limit=30, engine=engine)
+        render_news_sentiment_panel(news_res)
 
     # ---- Segments + Geography (FMP-only) ----
     from analysis.segments import (
