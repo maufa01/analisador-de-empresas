@@ -1030,7 +1030,19 @@ with tab_valuation:
 
 # ---- Financials ----
 with tab_financials:
-    # ---- Top bar: view-mode toggle + Excel download on the right ----
+    # ---- SEC EDGAR statements viewer (primary view) ----
+    from ui.components.financial_statements_panel import (
+        render_financial_statements_panel,
+    )
+    render_financial_statements_panel(active_ticker)
+
+    st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="eq-section-label">ALTERNATIVE VIEW · YFINANCE / FMP</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ---- Legacy view (yfinance / FMP camelCase) ----
     fin_l, fin_r1, fin_r2 = st.columns([4, 1.4, 1.4])
     with fin_l:
         view_mode_label = st.radio(
@@ -1119,22 +1131,33 @@ with tab_financials:
 
 # ---- Ratios ----
 with tab_ratios:
-    from ui.components.ratios_grid import render_ratios_grid
-    market_cap = market_cap_live
-    enterprise_value = None
-    if market_cap is not None and "totalDebt" in bal.columns:
-        try:
-            enterprise_value = market_cap + float(bal["totalDebt"].iloc[-1])
-        except Exception:
-            enterprise_value = None
-    render_ratios_grid(
-        income=inc, balance=bal, cash=cf,
-        ratios=ratios,
-        sector=sector_label,
+    # ---- SEC-driven Ratio Engine (primary view, US-listed tickers) ----
+    from ui.components.ratios_engine_panel import render_ratios_engine_panel
+    render_ratios_engine_panel(
+        active_ticker,
+        market_cap=market_cap_live,
         current_price=current_price,
-        market_cap=market_cap,
-        enterprise_value=enterprise_value,
+        sector=sector_label,
     )
+
+    # ---- Legacy yfinance-driven ratios grid (fallback for non-US) ----
+    with st.expander("Alternative ratios — yfinance source", expanded=False):
+        from ui.components.ratios_grid import render_ratios_grid
+        market_cap = market_cap_live
+        enterprise_value = None
+        if market_cap is not None and "totalDebt" in bal.columns:
+            try:
+                enterprise_value = market_cap + float(bal["totalDebt"].iloc[-1])
+            except Exception:
+                enterprise_value = None
+        render_ratios_grid(
+            income=inc, balance=bal, cash=cf,
+            ratios=ratios,
+            sector=sector_label,
+            current_price=current_price,
+            market_cap=market_cap,
+            enterprise_value=enterprise_value,
+        )
 
 
 # ---- Quality ----
