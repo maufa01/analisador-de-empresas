@@ -445,15 +445,43 @@ render_competitive_landscape(
 # ============================================================
 st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
+def _safe_float(v):
+    """Return float(v) when present and finite; None otherwise.
+    Critical: float(NaN) returns NaN (not None), and NaN propagates
+    through the UI as '$nan' / 'nan%'. Catch every empty / non-finite
+    case here so the cards render '—' instead of 'nan'."""
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(f) or not np.isfinite(f):
+        return None
+    return f
+
+
+def _safe_metric(row, key):
+    """Pull row[key] and pass through _safe_float."""
+    if key not in row:
+        return None
+    return _safe_float(row[key])
+
+
 last = ratios.iloc[-1]
-rev = float(last["Revenue"]) if "Revenue" in last else None
+rev = _safe_metric(last, "Revenue")
+prev_rev = (_safe_float(ratios["Revenue"].iloc[-2])
+            if "Revenue" in ratios.columns and len(ratios) >= 2 else None)
 rev_growth = None
-if "Revenue" in ratios.columns and len(ratios) >= 2:
-    prev_rev = float(ratios["Revenue"].iloc[-2])
-    if prev_rev > 0 and rev:
-        rev_growth = (rev / prev_rev - 1.0) * 100.0
-net_margin = float(last["Net Margin %"]) if "Net Margin %" in last else None
-roic = float(last["ROIC %"]) if "ROIC %" in last else None
+if rev is not None and prev_rev and prev_rev > 0:
+    rev_growth = (rev / prev_rev - 1.0) * 100.0
+net_margin = _safe_metric(last, "Net Margin %")
+roic = _safe_metric(last, "ROIC %")
 
 render_quick_metrics(
     revenue=rev,
