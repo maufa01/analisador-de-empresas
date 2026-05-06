@@ -241,9 +241,24 @@ with ic4:
         st.rerun()
 
 # ============================================================
-# Live data fetch — validate ticker first, then pull every dataset
-# from real providers. No fixtures.
+# Universal resolver — classify the ticker and route accordingly.
+# Sector dashboards (bank / REIT / insurance) render above the
+# standard pipeline; ETFs / crypto / indices / errors short-circuit
+# and replace the standard analysis entirely.
 # ============================================================
+from analysis.universal_resolver import resolve as _resolve_ticker
+from ui.components.resolver_views import maybe_render_non_standard_view
+
+_resolved = _resolve_ticker(active_ticker)
+if maybe_render_non_standard_view(_resolved):
+    st.stop()
+
+# At this point the resolver said: full / full_bank / full_reit /
+# full_insurance / partial. The sector dashboards (when applicable)
+# have already been rendered above; the standard pipeline now runs.
+
+# Validate ticker against live providers (defensive — should already
+# have succeeded during classification, but providers can flake).
 try:
     _live_validate_ticker(active_ticker)
 except ValueError as exc:
