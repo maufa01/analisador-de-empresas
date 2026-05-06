@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from datetime import datetime
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -60,58 +61,70 @@ from ui.components.valuation_summary import render_valuation_summary
 
 
 # ============================================================
-# Demo data (fixtures + curated metadata)
+# LIVE-ONLY data path. Every figure on the page comes from a real
+# provider. The previous _DEMO_* dicts (AAPL=$185, hardcoded 52w
+# range $164–$198, etc.) have been deleted — they were the source of
+# the stale-price bug.
+#
+# Data flow per ticker:
+#     1. validate_ticker(ticker)         — confirm the ticker exists.
+#     2. get_company_info(ticker)        — sector, market cap, 52w, etc.
+#     3. get_current_price(ticker)       — live quote (Finnhub → yfinance).
+#     4. require_financials(ticker)      — SEC EDGAR → yfinance → FMP.
+#     5. fetch_live_peers(ticker, sector) — peer roster from FMP if available.
+#
+# Fixtures (tests/fixtures/*.py) still ship with the repo for pytest;
+# they are never read by the page.
 # ============================================================
-def _load_demo(ticker: str):
-    from tests.fixtures import aapl_fy2023, msft_fy2023, jpm_fy2023
-    table = {"AAPL": aapl_fy2023, "MSFT": msft_fy2023, "JPM": jpm_fy2023}
-    if ticker in table:
-        m = table[ticker]
-        return m.income(), m.balance(), m.cash_flow()
-    return None
+from analysis.data_adapter import (
+    DataSourceError,
+    get_current_price as _live_get_current_price,
+    get_company_info as _live_get_company_info,
+    require_financials as _live_require_financials,
+    validate_ticker as _live_validate_ticker,
+)
 
 
-_DEMO_PEERS: dict[str, list[PeerSnapshot]] = {
-    "AAPL": [
-        PeerSnapshot("MSFT",  market_cap=2_900e9, enterprise_value=2_950e9,
-                     net_income=72.4e9,  revenue=211.9e9, ebitda=102.4e9, book_value=206.2e9),
-        PeerSnapshot("GOOGL", market_cap=1_800e9, enterprise_value=1_750e9,
-                     net_income=73.8e9,  revenue=307.4e9, ebitda=95.4e9,  book_value=283.4e9),
-        PeerSnapshot("META",  market_cap=1_100e9, enterprise_value=1_080e9,
-                     net_income=39.1e9,  revenue=134.9e9, ebitda=70.2e9,  book_value=153.2e9),
-        PeerSnapshot("NVDA",  market_cap=2_300e9, enterprise_value=2_290e9,
-                     net_income=29.8e9,  revenue=60.9e9,  ebitda=37.1e9,  book_value=43.0e9),
-    ],
-    "MSFT": [
-        PeerSnapshot("AAPL",  market_cap=2_950e9, enterprise_value=3_030e9,
-                     net_income=97.0e9,  revenue=383.3e9, ebitda=129.6e9, book_value=62.1e9),
-        PeerSnapshot("GOOGL", market_cap=1_800e9, enterprise_value=1_750e9,
-                     net_income=73.8e9,  revenue=307.4e9, ebitda=95.4e9,  book_value=283.4e9),
-        PeerSnapshot("META",  market_cap=1_100e9, enterprise_value=1_080e9,
-                     net_income=39.1e9,  revenue=134.9e9, ebitda=70.2e9,  book_value=153.2e9),
-        PeerSnapshot("ORCL",  market_cap=350e9,   enterprise_value=440e9,
-                     net_income=10.5e9,  revenue=50.0e9,  ebitda=20.4e9,  book_value=1.6e9),
-    ],
-    "JPM": [
-        PeerSnapshot("BAC", market_cap=270e9, net_income=26.5e9, revenue=171.9e9, book_value=291.6e9),
-        PeerSnapshot("WFC", market_cap=200e9, net_income=19.1e9, revenue=82.6e9,  book_value=187.4e9),
-        PeerSnapshot("C",   market_cap=130e9, net_income=9.2e9,  revenue=78.5e9,  book_value=205.5e9),
-        PeerSnapshot("GS",  market_cap=160e9, net_income=8.5e9,  revenue=46.3e9,  book_value=117.0e9),
-        PeerSnapshot("MS",  market_cap=180e9, net_income=9.1e9,  revenue=54.1e9,  book_value=99.9e9),
-    ],
-}
-
-_DEMO_PRICE: dict[str, float] = {"AAPL": 185.0, "MSFT": 330.0, "JPM": 160.0}
-_DEMO_DAILY_PCT: dict[str, float] = {"AAPL": 1.18, "MSFT": -0.42, "JPM": 0.85}
-_DEMO_W52: dict[str, tuple[float, float]] = {
-    "AAPL": (164.0, 198.0), "MSFT": (275.0, 372.0), "JPM": (135.0, 172.0),
-}
-_DEMO_MARKET_CAP: dict[str, float] = {"AAPL": 2_950e9, "MSFT": 2_460e9, "JPM": 470e9}
-_DEMO_SECTOR: dict[str, str] = {
-    "AAPL": "Technology",
-    "MSFT": "Technology",
-    "JPM":  "Financial Services",
-}
+def _fetch_live_peers(ticker: str, sector: Optional[str]) -> list[PeerSnapshot]:
+    """Best-effort peer roster from FMP. Returns [] when no key / no peers."""
+    try:
+        from data.fmp_provider import FMPProvider
+        from core.exceptions import MissingAPIKeyError, ProviderError
+    except Exception:
+        return []
+    try:
+        prov = FMPProvider()
+    except MissingAPIKeyError:
+        return []
+    except Exception:
+        return []
+    try:
+        peers = prov.fetch_peers(ticker) or []
+    except (MissingAPIKeyError, ProviderError):
+        return []
+    except Exception:
+        return []
+    out: list[PeerSnapshot] = []
+    for p in peers[:6]:
+        # FMP fetch_peers returns dicts with at least 'symbol' and basic stats
+        if isinstance(p, str):
+            out.append(PeerSnapshot(p))
+            continue
+        if not isinstance(p, dict):
+            continue
+        sym = p.get("symbol") or p.get("ticker")
+        if not sym:
+            continue
+        out.append(PeerSnapshot(
+            ticker=sym,
+            market_cap=p.get("marketCap") or p.get("mktCap"),
+            enterprise_value=p.get("enterpriseValue"),
+            net_income=p.get("netIncomeTTM") or p.get("netIncome"),
+            revenue=p.get("revenueTTM") or p.get("revenue"),
+            ebitda=p.get("ebitdaTTM") or p.get("ebitda"),
+            book_value=p.get("totalEquity") or p.get("bookValue"),
+        ))
+    return out
 
 
 # ============================================================
@@ -227,17 +240,57 @@ with ic4:
         _set_active(ticker)
         st.rerun()
 
-data = _load_demo(active_ticker)
-if data is None:
-    st.info(
-        f"`{active_ticker}` is not in the local fixture set. "
-        "Live FMP fetch arrives in a later session — meanwhile try AAPL, MSFT or JPM."
-    )
+# ============================================================
+# Live data fetch — validate ticker first, then pull every dataset
+# from real providers. No fixtures.
+# ============================================================
+try:
+    _live_validate_ticker(active_ticker)
+except ValueError as exc:
+    st.error(f"`{active_ticker}` not found in any provider. {exc}")
+    st.caption("Try a valid US-listed ticker (e.g. AAPL, NVDA, NFLX, KO).")
     st.stop()
 
-inc, bal, cf = data
+with st.spinner(f"Fetching {active_ticker} live data…"):
+    try:
+        live_info = _live_get_company_info(active_ticker)
+    except DataSourceError as exc:
+        st.error(f"❌ Could not fetch company info for {active_ticker}.")
+        st.caption(f"Providers tried: {', '.join(exc.providers_tried)}")
+        st.stop()
+
+    try:
+        live_quote = _live_get_current_price(active_ticker)
+    except DataSourceError as exc:
+        st.error(f"❌ Could not fetch a current price for {active_ticker}.")
+        st.caption(f"Providers tried: {', '.join(exc.providers_tried)}")
+        st.stop()
+
+    try:
+        bundle = _live_require_financials(active_ticker)
+    except DataSourceError as exc:
+        st.error(
+            f"❌ Could not fetch financial statements for {active_ticker} "
+            f"from any provider."
+        )
+        st.caption(
+            f"Providers tried: {', '.join(exc.providers_tried)}. "
+            "SEC EDGAR is the most reliable — make sure SEC_USER_AGENT is set."
+        )
+        st.stop()
+
+inc, bal, cf = bundle.income, bundle.balance, bundle.cash
 ratios = calculate_ratios(inc, bal, cf)
 eq = assess_earnings_quality(inc, bal, cf)
+
+# Single source of truth for everything the page needs from "info"
+sector = live_info.get("sector") or live_info.get("industry")
+current_price = float(live_quote["price"])
+market_cap_live = live_info.get("market_cap")
+w52_low = live_info.get("fifty_two_week_low")
+w52_high = live_info.get("fifty_two_week_high")
+daily_change_pct = float(live_quote.get("change_pct") or 0.0)
+peers_demo = _fetch_live_peers(active_ticker, sector)
 
 
 # ============================================================
@@ -247,8 +300,8 @@ eq = assess_earnings_quality(inc, bal, cf)
 # ============================================================
 base_assumptions: Assumptions = calculate_default_assumptions(
     income=inc, balance=bal, cash=cf,
-    beta_override=1.20,
-    market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+    beta_override=(live_info.get("beta") or 1.20),
+    market_cap=market_cap_live,
 )
 
 # Hydrate the panel's current state — the user's previously-edited dict
@@ -263,12 +316,10 @@ else:
 
 
 # ============================================================
-# Pipeline (single source of truth for everything below the header)
+# Pipeline (single source of truth for everything below the header).
+# All inputs (sector, current_price, peers_demo) were resolved live
+# above — there are no demo fallbacks.
 # ============================================================
-peers_demo = _DEMO_PEERS.get(active_ticker, [])
-sector = _DEMO_SECTOR.get(active_ticker)
-current_price = _DEMO_PRICE.get(active_ticker)
-
 with st.spinner("Running valuation pipeline…"):
     try:
         results = run_valuation(
@@ -306,18 +357,23 @@ if is_in_watchlist(active_ticker):
 # ============================================================
 # 2 — Big ticker header (price + intrinsic + rating)
 # ============================================================
-company_name = TICKER_META.get(active_ticker, {}).get("name", active_ticker)
-sector_label = TICKER_META.get(active_ticker, {}).get("sector", sector or "—")
+# Live company name; fall back to the static curated name if yfinance/Finnhub
+# didn't supply one (rare).
+company_name = (live_info.get("name")
+                or TICKER_META.get(active_ticker, {}).get("name", active_ticker))
+sector_label = (live_info.get("sector")
+                or live_info.get("industry")
+                or TICKER_META.get(active_ticker, {}).get("sector")
+                or "—")
 
-w52 = _DEMO_W52.get(active_ticker, (None, None))
 render_ticker_header(
     ticker=active_ticker,
     company_name=company_name,
     sector=sector_label,
-    market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+    market_cap=market_cap_live,
     current_price=current_price,
-    daily_change_pct=_DEMO_DAILY_PCT.get(active_ticker),
-    week52_low=w52[0], week52_high=w52[1],
+    daily_change_pct=daily_change_pct,
+    week52_low=w52_low, week52_high=w52_high,
     intrinsic=(results.aggregator.intrinsic_per_share
                if results.aggregator
                and np.isfinite(results.aggregator.intrinsic_per_share)
@@ -346,7 +402,7 @@ st.markdown(
 render_competitive_landscape(
     target_ticker=active_ticker,
     target_income=inc, target_balance=bal,
-    target_market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+    target_market_cap=market_cap_live,
     peers=peers_demo,
 )
 
@@ -383,7 +439,7 @@ from ui.components.peer_ranking_table import render_peer_ranking
 
 st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
 if peers_demo:
-    market_cap_pr = _DEMO_MARKET_CAP.get(active_ticker)
+    market_cap_pr = market_cap_live
     enterprise_value_pr = None
     if market_cap_pr is not None and "totalDebt" in bal.columns:
         try:
@@ -537,11 +593,11 @@ with tab_overview:
         render_peer_comparison_quick(
             target_ticker=active_ticker,
             target_income=inc, target_balance=bal,
-            target_market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+            target_market_cap=market_cap_live,
             target_enterprise_value=(
-                (_DEMO_MARKET_CAP.get(active_ticker, 0)
+                ((market_cap_live or 0)
                  + (float(bal["totalDebt"].iloc[-1]) if "totalDebt" in bal.columns else 0))
-                if active_ticker in _DEMO_MARKET_CAP else None
+                if market_cap_live is not None else None
             ),
             peers=peers_demo,
         )
@@ -638,7 +694,7 @@ with tab_overview:
                 debt_bs = float(_debt.dropna().iloc[-1]) if _debt is not None and not _debt.dropna().empty else 0.0
                 sotp_res = value_segments_sotp(
                     segments=segments_res,
-                    market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+                    market_cap=market_cap_live,
                     net_debt=(debt_bs - cash_bs),
                     shares_outstanding=shares_out,
                     current_price=current_price,
@@ -656,14 +712,14 @@ with tab_overview:
     if st.toggle("AI investment thesis (offline copy-paste)",
                  value=False, key=f"ai_thesis_toggle_{active_ticker}"):
         _sy_for_thesis = _sy_for_prompt(
-            cash=cf, market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+            cash=cf, market_cap=market_cap_live,
         )
         thesis_prompt = build_thesis_prompt(
             ticker=active_ticker,
             company_name=company_name,
             sector=sector_label,
             industry=TICKER_META.get(active_ticker, {}).get("industry"),
-            market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+            market_cap=market_cap_live,
             current_price=current_price,
             valuation_results=results,
             earnings_quality=eq,
@@ -1039,7 +1095,7 @@ with tab_financials:
 # ---- Ratios ----
 with tab_ratios:
     from ui.components.ratios_grid import render_ratios_grid
-    market_cap = _DEMO_MARKET_CAP.get(active_ticker)
+    market_cap = market_cap_live
     enterprise_value = None
     if market_cap is not None and "totalDebt" in bal.columns:
         try:
@@ -1154,7 +1210,7 @@ with tab_capital:
 
     capital_result = analyze_capital_allocation(
         income=inc, balance=bal, cash=cf,
-        market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+        market_cap=market_cap_live,
     )
     render_capital_allocation_dashboard(capital_result)
 
@@ -1173,7 +1229,7 @@ with tab_capital:
 
     st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
     sy_result = calculate_shareholder_yield(
-        cash=cf, market_cap=_DEMO_MARKET_CAP.get(active_ticker),
+        cash=cf, market_cap=market_cap_live,
     )
     render_shareholder_yield_card(sy_result)
 
