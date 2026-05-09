@@ -46,14 +46,16 @@ def render_index_card(
         if is_active else
         "border: 1px solid var(--border);"
     )
-    html = f"""
-    <div class="eq-card" role="group" aria-label="{label} index"
-         style="{border_style}">
-        <div class="eq-idx-label">{label}</div>
-        <div class="eq-idx-value">{_fmt_value(last)}</div>
-        <div class="eq-idx-change {chg_cls}">{chg_text}</div>
-    </div>
-    """
+    # Single-line HTML — indented f""" hits Streamlit's markdown
+    # code-block trap (≥4 spaces ⇒ HTML rendered as literal text).
+    html = (
+        f'<div class="eq-card" role="group" aria-label="{label} index" '
+        f'style="{border_style}">'
+        f'<div class="eq-idx-label">{label}</div>'
+        f'<div class="eq-idx-value">{_fmt_value(last)}</div>'
+        f'<div class="eq-idx-change {chg_cls}">{chg_text}</div>'
+        f'</div>'
+    )
     st.markdown(html, unsafe_allow_html=True)
 
     if selectable and symbol and on_select is not None:

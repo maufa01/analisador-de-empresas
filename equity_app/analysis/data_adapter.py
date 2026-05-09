@@ -51,11 +51,20 @@ class FinancialsBundle:
 
 
 class DataSourceError(Exception):
-    """Every provider in the chain failed. Surfaces the list it tried."""
-    def __init__(self, message: str, providers_tried: list[str]):
+    """Every provider in the chain failed. Carries both the human-readable
+    list of ``providers_tried`` (e.g. ``"fmp:missing_key (12ms)"``) AND
+    the structured ``attempts`` list of :class:`ProviderResult` so the UI
+    can render a per-provider table with status + latency + suggestion."""
+    def __init__(
+        self,
+        message: str,
+        providers_tried: list[str],
+        attempts: Optional[list] = None,
+    ):
         super().__init__(message)
         self.message = message
         self.providers_tried = list(providers_tried)
+        self.attempts = list(attempts) if attempts is not None else []
 
 
 def _yf_to_camelcase(yf_df: pd.DataFrame) -> pd.DataFrame:
@@ -269,6 +278,16 @@ def get_financials(ticker: str) -> Optional[FinancialsBundle]:
     for fn in chain:
         bundle = fn(ticker)
         if bundle is not None:
+            # Heal the income statement post-fetch (P10.2 — fixes Revenue
+            # NaN when EDGAR shipped XBRL aliases instead of FMP camelCase,
+            # and EBITDA truncated to 2023+ for FMP-sourced data).
+            try:
+                from analysis.data_quality import heal_income_statement
+                healed = heal_income_statement(bundle.income)
+                if healed is not None:
+                    bundle.income = healed
+            except Exception:
+                pass
             return bundle
     return None
 
@@ -365,25 +384,142 @@ def fmp_available() -> bool:
 from datetime import datetime, timezone
 
 
-def _price_from_finnhub(ticker: str) -> Optional[dict]:
+import time
+from functools import wraps as _wraps
+
+from core.provider_status import ProviderResult, ProviderStatus
+
+
+def _timed(fn):
+    """Wrap a ProviderResult-returning func with latency measurement."""
+    @_wraps(fn)
+    def _inner(*args, **kwargs):
+        t0 = time.time()
+        result = fn(*args, **kwargs)
+        if isinstance(result, ProviderResult):
+            result.latency_ms = (time.time() - t0) * 1000.0
+        return result
+    return _inner
+
+
+# ============================================================
+# FMP — price + info (FIRST in both chains, single paid provider)
+# ============================================================
+@_timed
+def _price_from_fmp(ticker: str) -> ProviderResult:
+    try:
+        from data.fmp_provider import FMPProvider
+        from core.exceptions import (
+            MissingAPIKeyError, RateLimitError, TickerNotFoundError,
+        )
+    except ImportError as e:
+        return ProviderResult("fmp", ProviderStatus.UNKNOWN, message=f"import: {e}")
+
+    try:
+        prov = FMPProvider()
+    except MissingAPIKeyError:
+        return ProviderResult(
+            "fmp", ProviderStatus.MISSING_KEY,
+            message="FMP_API_KEY not configured",
+        )
+    except Exception as e:
+        return ProviderResult("fmp", ProviderStatus.UNKNOWN, message=str(e))
+
+    try:
+        raw = prov._get(f"quote/{ticker.upper().strip()}")
+    except RateLimitError as e:
+        return ProviderResult("fmp", ProviderStatus.RATE_LIMITED, message=str(e))
+    except MissingAPIKeyError as e:
+        return ProviderResult("fmp", ProviderStatus.MISSING_KEY, message=str(e))
+    except TickerNotFoundError:
+        return ProviderResult(
+            "fmp", ProviderStatus.TICKER_NOT_FOUND,
+            message=f"FMP does not recognise {ticker}",
+        )
+    except Exception as e:
+        msg = str(e).lower()
+        if "timeout" in msg or "connection" in msg:
+            return ProviderResult("fmp", ProviderStatus.NETWORK_ERROR, message=str(e))
+        return ProviderResult("fmp", ProviderStatus.UNKNOWN, message=str(e))
+
+    if not raw or not isinstance(raw, list) or not raw[0]:
+        return ProviderResult(
+            "fmp", ProviderStatus.NO_MATCH,
+            message="quote endpoint returned empty",
+        )
+
+    q = raw[0]
+    price = q.get("price")
+    if price is None:
+        return ProviderResult(
+            "fmp", ProviderStatus.NO_MATCH,
+            message="quote returned no price field",
+        )
+
+    try:
+        cur = float(price)
+    except (TypeError, ValueError):
+        return ProviderResult(
+            "fmp", ProviderStatus.NO_MATCH,
+            message=f"unparseable price field: {price!r}",
+        )
+    pc = q.get("previousClose")
+    try:
+        prev = float(pc) if pc is not None else cur
+    except (TypeError, ValueError):
+        prev = cur
+    change = cur - prev
+    data = {
+        "price":           cur,
+        "previous_close":  prev,
+        "change":          change,
+        "change_pct":      float((change / prev * 100.0) if prev else 0.0),
+        "open_today":      float(q.get("open") or 0.0),
+        "high_today":      float(q.get("dayHigh") or 0.0),
+        "low_today":       float(q.get("dayLow") or 0.0),
+        "source":          "fmp",
+        "is_realtime":     False,           # FMP free tier is 15-min delayed
+        "fetched_at":      datetime.now(timezone.utc),
+    }
+    return ProviderResult("fmp", ProviderStatus.OK, data=data)
+
+
+@_timed
+def _price_from_finnhub(ticker: str) -> ProviderResult:
     """Real-time quote via Finnhub. Free tier: 60 req/min."""
     try:
         from data.finnhub_provider import is_available, fetch_quote
-    except Exception:
-        return None
+    except Exception as e:
+        return ProviderResult("finnhub", ProviderStatus.UNKNOWN, message=str(e))
     if not is_available():
-        return None
+        return ProviderResult(
+            "finnhub", ProviderStatus.MISSING_KEY,
+            message="FINNHUB_API_KEY not configured",
+        )
     try:
         q = fetch_quote(ticker)
-    except Exception:
-        return None
+    except Exception as e:
+        msg = str(e).lower()
+        if "rate" in msg or "429" in msg:
+            return ProviderResult("finnhub", ProviderStatus.RATE_LIMITED, message=str(e))
+        if "401" in msg or "403" in msg:
+            return ProviderResult("finnhub", ProviderStatus.MISSING_KEY, message=str(e))
+        if "timeout" in msg or "connection" in msg:
+            return ProviderResult("finnhub", ProviderStatus.NETWORK_ERROR, message=str(e))
+        return ProviderResult("finnhub", ProviderStatus.UNKNOWN, message=str(e))
     if not isinstance(q, dict):
-        return None
+        return ProviderResult(
+            "finnhub", ProviderStatus.NO_MATCH,
+            message="fetch_quote returned non-dict",
+        )
     cur = q.get("c")
     if not cur or not isinstance(cur, (int, float)) or cur <= 0:
-        return None
+        return ProviderResult(
+            "finnhub", ProviderStatus.NO_MATCH,
+            message=f"no valid price (c={cur!r})",
+        )
     pc = q.get("pc") or 0.0
-    return {
+    data = {
         "price":           float(cur),
         "previous_close":  float(pc),
         "change":          float(q.get("d") or 0.0),
@@ -395,13 +531,15 @@ def _price_from_finnhub(ticker: str) -> Optional[dict]:
         "is_realtime":     True,
         "fetched_at":      datetime.now(timezone.utc),
     }
+    return ProviderResult("finnhub", ProviderStatus.OK, data=data)
 
 
-def _price_from_yfinance(ticker: str) -> Optional[dict]:
+@_timed
+def _price_from_yfinance(ticker: str) -> ProviderResult:
     try:
         import yfinance as yf
     except ImportError:
-        return None
+        return ProviderResult("yfinance", ProviderStatus.UNKNOWN, message="not installed")
     try:
         info = yf.Ticker(ticker).fast_info
         cur = None
@@ -414,15 +552,22 @@ def _price_from_yfinance(ticker: str) -> Optional[dict]:
         if not cur:
             full = yf.Ticker(ticker).info or {}
             cur = full.get("regularMarketPrice") or full.get("currentPrice")
-            prev = full.get("regularMarketPreviousClose") or full.get("previousClose") or cur
+            prev = (full.get("regularMarketPreviousClose")
+                    or full.get("previousClose") or cur)
             cur = float(cur) if cur else None
             prev = float(prev) if prev else cur
-    except Exception:
-        return None
+    except Exception as e:
+        msg = str(e).lower()
+        if "rate" in msg or "429" in msg:
+            return ProviderResult("yfinance", ProviderStatus.RATE_LIMITED, message=str(e))
+        return ProviderResult("yfinance", ProviderStatus.UNKNOWN, message=str(e))
     if not cur or cur <= 0:
-        return None
+        return ProviderResult(
+            "yfinance", ProviderStatus.SCRAPE_BLOCKED,
+            message=f"no last_price returned (cur={cur!r}) — likely Yahoo scrape-block",
+        )
     change = cur - (prev or cur)
-    return {
+    data = {
         "price":           float(cur),
         "previous_close":  float(prev or cur),
         "change":          float(change),
@@ -431,51 +576,190 @@ def _price_from_yfinance(ticker: str) -> Optional[dict]:
         "high_today":      0.0,
         "low_today":       0.0,
         "source":          "yfinance",
-        "is_realtime":     False,           # yfinance is 15min delayed
+        "is_realtime":     False,           # yfinance is 15-min delayed
         "fetched_at":      datetime.now(timezone.utc),
     }
+    return ProviderResult("yfinance", ProviderStatus.OK, data=data)
+
+
+# ============================================================
+# get_current_price — chain: FMP → Finnhub → yfinance
+# ============================================================
+def _diagnose_failure(
+    ticker: str,
+    attempts: list,
+    *,
+    kind: str,
+) -> str:
+    """Build a human-readable error message from the failed attempts."""
+    statuses = {a.status for a in attempts}
+    lines = [f"Could not fetch {kind} for {ticker}."]
+
+    only_missing = (statuses == {ProviderStatus.MISSING_KEY})
+    if only_missing:
+        lines.append(
+            "All providers report MISSING_KEY — set FMP_API_KEY and/or "
+            "FINNHUB_API_KEY env vars (or in .streamlit/secrets.toml)."
+        )
+    elif ProviderStatus.TICKER_NOT_FOUND in statuses:
+        lines.append(f"Ticker {ticker} may be delisted or invalid.")
+    elif ProviderStatus.RATE_LIMITED in statuses:
+        lines.append(
+            "Rate-limited on at least one provider. Wait ~60 seconds and retry."
+        )
+    elif any(a.status == ProviderStatus.SCRAPE_BLOCKED
+             for a in attempts if a.provider == "yfinance"):
+        lines.append(
+            "yfinance is currently scrape-blocked by Yahoo. FMP should be "
+            "primary — verify FMP_API_KEY is set and valid."
+        )
+    return " ".join(lines)
 
 
 def get_current_price(ticker: str) -> dict:
-    """
-    Real-time price via the live chain.
+    """Live price via cascading chain. Order: FMP → Finnhub → yfinance.
 
-    Order: Finnhub (real-time) → yfinance (15-min delayed).
-    Raises ``DataSourceError`` when both fail.
+    Raises :class:`DataSourceError` (with the full ``attempts`` list) when
+    every provider fails — UI uses the structured info to render a
+    per-provider diagnostic table.
     """
     if not ticker:
         raise DataSourceError("Empty ticker", [])
-    tried: list[str] = []
-    for fn, name in ((_price_from_finnhub, "finnhub"),
-                     (_price_from_yfinance, "yfinance")):
-        try:
-            data = fn(ticker)
-        except Exception as e:
-            tried.append(f"{name}:failed:{type(e).__name__}")
-            continue
-        if data is not None:
-            tried.append(name)
-            data["providers_tried"] = tried
+
+    attempts: list[ProviderResult] = []
+    for fn in (_price_from_fmp, _price_from_finnhub, _price_from_yfinance):
+        result = fn(ticker)
+        attempts.append(result)
+        if result.is_ok:
+            data = dict(result.data)
+            data["providers_tried"] = [r.to_label() for r in attempts]
             return data
-        tried.append(f"{name}:no-data")
+
     raise DataSourceError(
-        f"Could not fetch current price for {ticker}", tried,
+        message=_diagnose_failure(ticker, attempts, kind="price"),
+        providers_tried=[r.to_label() for r in attempts],
+        attempts=attempts,
     )
 
 
-def _info_from_yfinance(ticker: str) -> Optional[dict]:
+@_timed
+def _info_from_fmp(ticker: str) -> ProviderResult:
+    """FMP /profile — primary info source. Most reliable when key is set."""
+    try:
+        from data.fmp_provider import FMPProvider
+        from core.exceptions import (
+            MissingAPIKeyError, RateLimitError, TickerNotFoundError,
+        )
+    except ImportError as e:
+        return ProviderResult("fmp", ProviderStatus.UNKNOWN, message=f"import: {e}")
+
+    try:
+        prov = FMPProvider()
+    except MissingAPIKeyError:
+        return ProviderResult(
+            "fmp", ProviderStatus.MISSING_KEY,
+            message="FMP_API_KEY not configured",
+        )
+    except Exception as e:
+        return ProviderResult("fmp", ProviderStatus.UNKNOWN, message=str(e))
+
+    try:
+        p = prov.fetch_profile(ticker)
+    except TickerNotFoundError:
+        return ProviderResult(
+            "fmp", ProviderStatus.TICKER_NOT_FOUND,
+            message=f"FMP does not recognise {ticker}",
+        )
+    except RateLimitError as e:
+        return ProviderResult("fmp", ProviderStatus.RATE_LIMITED, message=str(e))
+    except MissingAPIKeyError as e:
+        return ProviderResult("fmp", ProviderStatus.MISSING_KEY, message=str(e))
+    except Exception as e:
+        msg = str(e).lower()
+        if "timeout" in msg or "connection" in msg:
+            return ProviderResult("fmp", ProviderStatus.NETWORK_ERROR, message=str(e))
+        return ProviderResult("fmp", ProviderStatus.UNKNOWN, message=str(e))
+
+    if not p or not p.get("companyName"):
+        return ProviderResult(
+            "fmp", ProviderStatus.NO_MATCH,
+            message="profile endpoint returned empty",
+        )
+
+    # FMP's /profile ships the 52-week range as "low-high" string.
+    range_str = p.get("range") or ""
+    range_parts = [s.strip() for s in range_str.split("-")] if range_str else []
+    def _f(idx):
+        try:
+            return float(range_parts[idx]) if range_parts[idx] else None
+        except (ValueError, IndexError):
+            return None
+    w52_low = _f(0) if len(range_parts) >= 1 else None
+    w52_high = _f(-1) if len(range_parts) >= 2 else None
+
+    data = {
+        "name":               p.get("companyName"),
+        "sector":             p.get("sector"),
+        "industry":           p.get("industry"),
+        "country":            p.get("country"),
+        "exchange":           p.get("exchangeShortName") or p.get("exchange"),
+        "website":            p.get("website"),
+        "description":        p.get("description"),
+        "employees":          p.get("fullTimeEmployees"),
+        "market_cap":         p.get("mktCap"),
+        # /profile carries shares as a separate field on some plans;
+        # downstream code can also fall back to key_metrics.
+        "shares_outstanding": _safe_int(p.get("sharesOutstanding")),
+        "fifty_two_week_high": w52_high,
+        "fifty_two_week_low":  w52_low,
+        "beta":               p.get("beta"),
+        "currency":           p.get("currency", "USD"),
+        "ceo":                p.get("ceo"),
+        "ipo":                p.get("ipoDate"),
+        "city":               p.get("city"),
+        "state":              p.get("state"),
+        "source":             "fmp",
+    }
+    return ProviderResult("fmp", ProviderStatus.OK, data=data)
+
+
+def _safe_int(v):
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+@_timed
+def _info_from_yfinance(ticker: str) -> ProviderResult:
     try:
         import yfinance as yf
     except ImportError:
-        return None
+        return ProviderResult("yfinance", ProviderStatus.UNKNOWN, message="not installed")
     try:
         info = yf.Ticker(ticker).info or {}
-    except Exception:
-        return None
+    except Exception as e:
+        msg = str(e).lower()
+        if "rate" in msg or "429" in msg:
+            return ProviderResult("yfinance", ProviderStatus.RATE_LIMITED, message=str(e))
+        return ProviderResult("yfinance", ProviderStatus.UNKNOWN, message=str(e))
+
+    # Heuristic: a healthy yfinance .info dict has ~80+ keys. When Yahoo
+    # blocks the scrape it returns a near-empty stub like {"trailingPegRatio": None}.
+    if len(info) < 10:
+        return ProviderResult(
+            "yfinance", ProviderStatus.SCRAPE_BLOCKED,
+            message=(f"info dict has {len(info)} keys (expected 80+) "
+                     "— likely Yahoo scrape-block"),
+        )
     name = info.get("longName") or info.get("shortName")
     if not name:
-        return None
-    return {
+        return ProviderResult(
+            "yfinance", ProviderStatus.SCRAPE_BLOCKED,
+            message="info has keys but no longName / shortName",
+        )
+
+    data = {
         "name":               name,
         "sector":             info.get("sector"),
         "industry":           info.get("industry"),
@@ -492,27 +776,49 @@ def _info_from_yfinance(ticker: str) -> Optional[dict]:
         "pe_ratio":           info.get("trailingPE"),
         "forward_pe":         info.get("forwardPE"),
         "dividend_yield":     info.get("dividendYield"),
+        # Preserve the raw yfinance camelCase fields company_profile.py uses
+        "longName":           info.get("longName"),
+        "shortName":          info.get("shortName"),
+        "longBusinessSummary": info.get("longBusinessSummary"),
+        "companyOfficers":    info.get("companyOfficers", []),
+        "city":               info.get("city"),
+        "state":              info.get("state"),
         "source":             "yfinance",
     }
+    return ProviderResult("yfinance", ProviderStatus.OK, data=data)
 
 
-def _info_from_finnhub(ticker: str) -> Optional[dict]:
+@_timed
+def _info_from_finnhub(ticker: str) -> ProviderResult:
     """Finnhub /stock/profile2 — light company profile fallback."""
     try:
         from data.finnhub_provider import is_available, _get
-    except Exception:
-        return None
+    except Exception as e:
+        return ProviderResult("finnhub", ProviderStatus.UNKNOWN, message=str(e))
     if not is_available():
-        return None
+        return ProviderResult(
+            "finnhub", ProviderStatus.MISSING_KEY,
+            message="FINNHUB_API_KEY not configured",
+        )
     try:
         profile = _get("stock/profile2", {"symbol": ticker})
-    except Exception:
-        return None
+    except Exception as e:
+        msg = str(e).lower()
+        if "rate" in msg or "429" in msg:
+            return ProviderResult("finnhub", ProviderStatus.RATE_LIMITED, message=str(e))
+        if "401" in msg or "403" in msg:
+            return ProviderResult("finnhub", ProviderStatus.MISSING_KEY, message=str(e))
+        if "timeout" in msg or "connection" in msg:
+            return ProviderResult("finnhub", ProviderStatus.NETWORK_ERROR, message=str(e))
+        return ProviderResult("finnhub", ProviderStatus.UNKNOWN, message=str(e))
     if not isinstance(profile, dict) or not profile.get("name"):
-        return None
+        return ProviderResult(
+            "finnhub", ProviderStatus.NO_MATCH,
+            message="profile2 returned empty / no 'name' field",
+        )
     mcap = profile.get("marketCapitalization")
     shares = profile.get("shareOutstanding")
-    return {
+    data = {
         "name":               profile.get("name"),
         "industry":           profile.get("finnhubIndustry"),
         "country":            profile.get("country"),
@@ -520,36 +826,42 @@ def _info_from_finnhub(ticker: str) -> Optional[dict]:
         "website":            profile.get("weburl"),
         "logo":               profile.get("logo"),
         "ipo":                profile.get("ipo"),
-        # Finnhub returns market cap in MILLIONS — normalise to absolute USD.
         "market_cap":         (float(mcap) * 1e6) if isinstance(mcap, (int, float)) else None,
         "shares_outstanding": (float(shares) * 1e6) if isinstance(shares, (int, float)) else None,
         "source":             "finnhub",
     }
+    return ProviderResult("finnhub", ProviderStatus.OK, data=data)
 
 
+# ============================================================
+# get_company_info — chain: FMP → yfinance → Finnhub
+# ============================================================
 def get_company_info(ticker: str) -> dict:
-    """
-    Sector / industry / market cap / 52w / etc. from the live chain.
+    """Sector / industry / market cap / 52w / etc. from the live chain.
 
-    Order: yfinance → Finnhub. Raises ``DataSourceError`` on full failure.
+    Order: FMP → yfinance → Finnhub. FMP is primary because it is the
+    only paid provider and the most reliable; yfinance has the richest
+    fields when it's not scrape-blocked; Finnhub is the safety net.
+
+    Raises :class:`DataSourceError` (with structured ``attempts``) on
+    full failure so the UI can render a per-provider diagnostic table.
     """
     if not ticker:
         raise DataSourceError("Empty ticker", [])
-    tried: list[str] = []
-    for fn, name in ((_info_from_yfinance, "yfinance"),
-                     (_info_from_finnhub, "finnhub")):
-        try:
-            data = fn(ticker)
-        except Exception as e:
-            tried.append(f"{name}:failed:{type(e).__name__}")
-            continue
-        if data is not None:
-            tried.append(name)
-            data["providers_tried"] = tried
+
+    attempts: list[ProviderResult] = []
+    for fn in (_info_from_fmp, _info_from_yfinance, _info_from_finnhub):
+        result = fn(ticker)
+        attempts.append(result)
+        if result.is_ok:
+            data = dict(result.data)
+            data["providers_tried"] = [r.to_label() for r in attempts]
             return data
-        tried.append(f"{name}:no-data")
+
     raise DataSourceError(
-        f"Could not fetch company info for {ticker}", tried,
+        message=_diagnose_failure(ticker, attempts, kind="company info"),
+        providers_tried=[r.to_label() for r in attempts],
+        attempts=attempts,
     )
 
 
@@ -565,18 +877,17 @@ def validate_ticker(ticker: str) -> dict:
     if not t or len(t) > 10:
         raise ValueError(f"Invalid ticker format: {ticker!r}")
 
-    # Cheap path: Finnhub /stock/profile2
-    info = _info_from_finnhub(t)
-    if info is None:
-        info = _info_from_yfinance(t)
-    if info is None:
-        raise ValueError(f"Ticker {t} not found in any provider")
-    return {
-        "valid":    True,
-        "ticker":   t,
-        "name":     info.get("name"),
-        "exchange": info.get("exchange"),
-    }
+    # Cheap path: walk the same chain but stop at the first OK provider.
+    for fn in (_info_from_fmp, _info_from_finnhub, _info_from_yfinance):
+        result = fn(t)
+        if result.is_ok:
+            return {
+                "valid":    True,
+                "ticker":   t,
+                "name":     result.data.get("name"),
+                "exchange": result.data.get("exchange"),
+            }
+    raise ValueError(f"Ticker {t} not found in any provider")
 
 
 def require_financials(ticker: str) -> FinancialsBundle:

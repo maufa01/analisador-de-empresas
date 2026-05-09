@@ -130,4 +130,24 @@ __all__ = [
     "format_multiple",
     "format_period",
     "format_yoy",
+    "safe_fmt",
 ]
+
+
+def safe_fmt(value, fmt: str = ".2f", default: str = "—") -> str:
+    """Robust ``format()`` wrapper: ``None`` / ``NaN`` / ``inf`` / non-numeric
+    inputs return ``default`` instead of raising ``TypeError``.
+
+    Use anywhere a Python f-string format-spec might receive missing data
+    (e.g. ``{result.avg_5y_ccc:.0f}`` exploding when the ratio is None
+    for a utility / software company without inventory tracking).
+    """
+    import math
+    if value is None:
+        return default
+    try:
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            return default
+        return format(value, fmt)
+    except (ValueError, TypeError):
+        return default

@@ -124,9 +124,20 @@ class FMPProvider(DataProvider):
         ratios_p = self.fetch_ratios(ticker, years)
         prices = self.fetch_prices(ticker, years=min(years, 5))
 
+        info = _profile_to_info(profile)
+        # Override mcap/price-derived shares with the explicit field —
+        # avoids rounding errors of ~hundreds of thousands of shares
+        # for large caps that propagate to per-share intrinsic value.
+        if (not key_metrics.empty
+                and "weightedAverageShsOut" in key_metrics.columns):
+            shares_series = key_metrics["weightedAverageShsOut"].dropna()
+            if not shares_series.empty:
+                info["sharesOutstanding"] = float(shares_series.iloc[-1])
+                info["sharesOutstandingSource"] = "key_metrics"
+
         return CompanyData(
             ticker=ticker,
-            info=_profile_to_info(profile),
+            info=info,
             income_stmt=income,
             balance_sheet=balance,
             cash_flow=cash,
@@ -169,6 +180,46 @@ class FMPProvider(DataProvider):
             period="annual",
         )
         return _to_dataframe(data)
+
+    # ---- Quarterly variants (powering TTM column in hybrid view) ----
+    @cached("financials", ttl=CACHE_TTL["financials"])
+    def fetch_income_statement_quarterly(
+        self, ticker: str, quarters: int = 8,
+    ) -> pd.DataFrame:
+        try:
+            data = self._get(
+                f"income-statement/{ticker.upper().strip()}",
+                limit=quarters, period="quarter",
+            )
+            return _to_dataframe(data)
+        except TickerNotFoundError:
+            return pd.DataFrame()
+
+    @cached("financials", ttl=CACHE_TTL["financials"])
+    def fetch_balance_sheet_quarterly(
+        self, ticker: str, quarters: int = 8,
+    ) -> pd.DataFrame:
+        try:
+            data = self._get(
+                f"balance-sheet-statement/{ticker.upper().strip()}",
+                limit=quarters, period="quarter",
+            )
+            return _to_dataframe(data)
+        except TickerNotFoundError:
+            return pd.DataFrame()
+
+    @cached("financials", ttl=CACHE_TTL["financials"])
+    def fetch_cash_flow_quarterly(
+        self, ticker: str, quarters: int = 8,
+    ) -> pd.DataFrame:
+        try:
+            data = self._get(
+                f"cash-flow-statement/{ticker.upper().strip()}",
+                limit=quarters, period="quarter",
+            )
+            return _to_dataframe(data)
+        except TickerNotFoundError:
+            return pd.DataFrame()
 
     @cached("fundamentals", ttl=CACHE_TTL["fundamentals"])
     def fetch_key_metrics(self, ticker: str, years: int = 10) -> pd.DataFrame:
@@ -268,6 +319,10 @@ class FMPProvider(DataProvider):
                 raise TickerNotFoundError()
             if status == 429:
                 raise RateLimitError("FMP rate limited (429)")
+            if status in (401, 403):
+                raise MissingAPIKeyError(
+                    f"FMP returned {status} — API key invalid or expired"
+                )
             if status >= 500:
                 raise ProviderError(f"FMP {status}")
             try:
@@ -285,6 +340,10 @@ class FMPProvider(DataProvider):
                     raise TickerNotFoundError() from e
                 if e.code == 429:
                     raise RateLimitError("FMP rate limited (429)") from e
+                if e.code in (401, 403):
+                    raise MissingAPIKeyError(
+                        f"FMP returned {e.code} — API key invalid or expired"
+                    ) from e
                 raise ProviderError(f"FMP {e.code}") from e
             try:
                 data = _json.loads(raw)
@@ -328,10 +387,23 @@ def _to_dataframe(data: Any) -> pd.DataFrame:
 
 
 def _profile_to_info(p: dict) -> dict:
-    """Normalize FMP profile to the info dict shape used across providers."""
+    """Normalize FMP profile to the info dict shape used across providers.
+
+    FMP's ``lastDiv`` is the dollar amount of the most recent dividend
+    (e.g. 0.96 for AAPL), NOT the yield. We compute yield from
+    ``lastDiv / price`` so downstream UI can format it as a percentage.
+
+    Shares outstanding from ``mcap / price`` introduces rounding errors
+    that propagate to per-share intrinsic-value calcs — ``fetch_company``
+    overrides this with ``weightedAverageShsOut`` from key-metrics.
+    """
     price = _to_float(p.get("price"))
     mcap = _to_float(p.get("mktCap"))
     shares_out = (mcap / price) if (price and mcap) else None
+
+    last_div = _to_float(p.get("lastDiv"))
+    div_yield = (last_div / price) if (last_div and price and price > 0) else None
+
     return {
         "shortName": p.get("companyName"),
         "longName": p.get("companyName"),
@@ -345,7 +417,9 @@ def _profile_to_info(p: dict) -> dict:
         "beta": _to_float(p.get("beta")),
         "trailingEps": _to_float(p.get("eps")) if "eps" in p else None,
         "sharesOutstanding": shares_out,
-        "dividendYield": _to_float(p.get("lastDiv")),
+        "sharesOutstandingSource": "mcap_div_price" if shares_out is not None else None,
+        "lastDividend": last_div,
+        "dividendYield": div_yield,
         "ceo": p.get("ceo"),
         "website": p.get("website"),
         "image": p.get("image"),

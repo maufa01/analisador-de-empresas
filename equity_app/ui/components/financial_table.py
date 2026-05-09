@@ -26,6 +26,8 @@ import streamlit as st
 
 from core.account_labels import (
     INCOME_STATEMENT_ORDER, BALANCE_SHEET_ORDER, CASH_FLOW_ORDER,
+    INCOME_STATEMENT_LAYOUT, BALANCE_SHEET_LAYOUT, CASH_FLOW_LAYOUT,
+    CAGR_ELIGIBLE_ROWS, DerivedRow,
     SECTION_LABELS, get_label,
 )
 from core.formatters import (
@@ -33,7 +35,7 @@ from core.formatters import (
 )
 
 
-ViewMode = Literal["absolute", "common_size", "growth"]
+ViewMode = Literal["absolute", "common_size", "growth", "hybrid"]
 
 
 _THEAD_STYLE = (
@@ -260,23 +262,338 @@ def render_financial_table(
 
 
 # ============================================================
+# HYBRID VIEW — analyst-spreadsheet style
+# (absolute rows + derived % rows interleaved + TTM + N-year CAGR)
+# ============================================================
+from analysis.ratios import cagr as _cagr
+from analysis.ttm import (
+    compute_ttm_income, compute_ttm_balance, compute_ttm_cash,
+)
+
+
+def _compute_derived_value(
+    spec: DerivedRow,
+    df: pd.DataFrame,
+    period: pd.Timestamp,
+    prev_period: Optional[pd.Timestamp],
+) -> Optional[float]:
+    """Resolve the value of a DerivedRow at a given period."""
+    base = _resolve_value(df, spec.base_row, period)
+    if base is None:
+        return None
+
+    if spec.style == "yoy":
+        if prev_period is None:
+            return None
+        prev = _resolve_value(df, spec.base_row, prev_period)
+        if prev is None or prev == 0:
+            return None
+        return base / prev - 1.0
+
+    if spec.style == "margin_of_revenue":
+        rev = _resolve_value(df, "revenue", period)
+        if rev is None or rev == 0:
+            return None
+        return base / rev
+
+    if spec.style == "of_total_assets":
+        tot = _resolve_value(df, "totalAssets", period)
+        if tot is None or tot == 0:
+            return None
+        return base / tot
+
+    if spec.style == "of_total_liabilities":
+        tot = _resolve_value(df, "totalLiabilities", period)
+        if tot is None or tot == 0:
+            return None
+        return base / tot
+
+    if spec.style == "tax_rate":
+        if not spec.ref_row:
+            return None
+        ref = _resolve_value(df, spec.ref_row, period)
+        if ref is None or ref == 0:
+            return None
+        return base / ref
+
+    if spec.style == "capex_margin":
+        rev = _resolve_value(df, "revenue", period)
+        if rev is None or rev == 0:
+            return None
+        return base / rev          # capex itself is negative — margin is too
+
+    return None
+
+
+def _format_pct_cell(value: Optional[float], color_by_sign: bool) -> str:
+    if value is None:
+        return f'<td style="{_RIGHT_CELL} color:#4B5563;">—</td>'
+    pct = value * 100.0
+    if color_by_sign:
+        color = "#10B981" if pct > 0 else ("#B87333" if pct < 0 else "#9CA3AF")
+        sign = "+" if pct > 0 else ""
+    else:
+        color = "#9CA3AF"
+        sign = ""
+    return (
+        f'<td style="{_RIGHT_CELL} color:{color}; font-size:12px;">'
+        f'{sign}{pct:.2f}%</td>'
+    )
+
+
+def _cagr_for(df: pd.DataFrame, key: str, periods: int) -> Optional[float]:
+    if key not in df.columns:
+        return None
+    s = df[key].dropna()
+    if len(s) < periods + 1:
+        return None
+    val = _cagr(s, periods=periods)
+    return None if (val is None or math.isnan(val)) else float(val)
+
+
+def _ttm_value(ttm: Optional[pd.Series], key: str) -> Optional[float]:
+    if ttm is None or key not in ttm.index:
+        return None
+    v = ttm[key]
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ttm_derived_value(
+    spec: DerivedRow, ttm: Optional[pd.Series],
+) -> Optional[float]:
+    """Compute a derived row's TTM value when meaningful (margins, tax rate).
+    YoY and other "of-period" styles don't have a TTM analogue."""
+    if ttm is None:
+        return None
+    base = _ttm_value(ttm, spec.base_row)
+    if base is None:
+        return None
+    if spec.style == "margin_of_revenue":
+        rev = _ttm_value(ttm, "revenue")
+        return (base / rev) if (rev and rev != 0) else None
+    if spec.style == "tax_rate" and spec.ref_row:
+        ref = _ttm_value(ttm, spec.ref_row)
+        return (base / ref) if (ref and ref != 0) else None
+    if spec.style == "capex_margin":
+        rev = _ttm_value(ttm, "revenue")
+        return (base / rev) if (rev and rev != 0) else None
+    return None
+
+
+def _render_hybrid(
+    df: pd.DataFrame,
+    *,
+    layout: list,
+    table_label: str,
+    ttm: Optional[pd.Series],
+    show_ttm: bool,
+    show_cagr: bool,
+) -> None:
+    df = df.sort_index()
+    periods: list[pd.Timestamp] = list(df.index)
+
+    # --- header ---
+    header_cells: list[str] = [
+        f'<th style="{_TH_BASE_STYLE} text-align:left;">{table_label}</th>'
+    ]
+    for p in periods:
+        header_cells.append(
+            f'<th style="{_TH_BASE_STYLE} text-align:right;">{format_period(p)}</th>'
+        )
+    if show_ttm:
+        header_cells.append(
+            f'<th style="{_TH_BASE_STYLE} text-align:right; color:#C9A961;">TTM</th>'
+        )
+    if show_cagr:
+        header_cells.append(
+            f'<th style="{_TH_BASE_STYLE} text-align:right;">5Y CAGR</th>'
+        )
+        header_cells.append(
+            f'<th style="{_TH_BASE_STYLE} text-align:right;">10Y CAGR</th>'
+        )
+    head_html = (
+        f'<thead><tr style="{_THEAD_STYLE}">' + "".join(header_cells) + '</tr></thead>'
+    )
+
+    n_extra_cols = (1 if show_ttm else 0) + (2 if show_cagr else 0)
+    body_rows: list[str] = []
+
+    for entry in layout:
+        spec, role = entry
+
+        # Section header (ASSETS / LIABILITIES / EQUITY)
+        if role == "section_header":
+            label = SECTION_LABELS.get(spec, str(spec).strip("_").upper())
+            body_rows.append(_section_header_row(label, len(periods) + n_extra_cols - 1))
+            continue
+
+        # Derived row (interleaved % rows)
+        if isinstance(spec, DerivedRow):
+            cells: list[str] = []
+            indent_px = 24 * spec.indent
+            cells.append(
+                f'<td style="padding:4px 14px 4px {indent_px}px; '
+                f'color:#6B7280; font-size:11px; font-style:italic;">{spec.label}</td>'
+            )
+            prev_period: Optional[pd.Timestamp] = None
+            for period in periods:
+                v = _compute_derived_value(spec, df, period, prev_period)
+                cells.append(_format_pct_cell(v, spec.color_by_sign))
+                prev_period = period
+            if show_ttm:
+                cells.append(_format_pct_cell(_ttm_derived_value(spec, ttm),
+                                              spec.color_by_sign))
+            if show_cagr:
+                if (spec.style == "yoy"
+                        and spec.base_row in CAGR_ELIGIBLE_ROWS):
+                    for p in (5, 10):
+                        cells.append(_format_pct_cell(
+                            _cagr_for(df, spec.base_row, p),
+                            color_by_sign=True,
+                        ))
+                else:
+                    cells.append(f'<td style="{_RIGHT_CELL} color:#4B5563;">—</td>')
+                    cells.append(f'<td style="{_RIGHT_CELL} color:#4B5563;">—</td>')
+            body_rows.append(
+                f'<tr style="background:rgba(255,255,255,0.015);">'
+                + "".join(cells) + "</tr>"
+            )
+            continue
+
+        # Absolute row
+        key = spec
+        if key not in df.columns:
+            continue
+        is_subtotal = (role == "subtotal")
+        weight = "500" if is_subtotal else "400"
+        border = "border-top:1px solid #1F2937;" if is_subtotal else ""
+
+        cells = [
+            f'<td style="{_LABEL_CELL} color:#E8EAED; '
+            f'font-weight:{weight}; {border}">{get_label(key)}</td>'
+        ]
+        for period in periods:
+            v = _resolve_value(df, key, period)
+            text = format_financial_number(v, parens_for_negative=True) if v is not None else "—"
+            cells.append(
+                f'<td style="{_RIGHT_CELL} color:#E8EAED; '
+                f'font-weight:{weight}; {border}">{text}</td>'
+            )
+
+        if show_ttm:
+            v = _ttm_value(ttm, key)
+            if v is None:
+                cells.append(
+                    f'<td style="{_RIGHT_CELL} color:#4B5563; {border}">—</td>'
+                )
+            else:
+                cells.append(
+                    f'<td style="{_RIGHT_CELL} color:#C9A961; '
+                    f'font-weight:{weight}; {border}">'
+                    f'{format_financial_number(v, parens_for_negative=True)}</td>'
+                )
+
+        if show_cagr:
+            if key in CAGR_ELIGIBLE_ROWS:
+                for p in (5, 10):
+                    cells.append(_format_pct_cell(
+                        _cagr_for(df, key, p), color_by_sign=True,
+                    ))
+            else:
+                cells.append(f'<td style="{_RIGHT_CELL} color:#4B5563; {border}">—</td>')
+                cells.append(f'<td style="{_RIGHT_CELL} color:#4B5563; {border}">—</td>')
+
+        body_rows.append(f'<tr style="{_ROW_BASE_STYLE}">' + "".join(cells) + "</tr>")
+
+    body_html = "<tbody>" + "".join(body_rows) + "</tbody>"
+    table_html = (
+        '<div style="background:#131826; border:1px solid #1F2937; '
+        'border-radius:8px; overflow:auto;">'
+        '<table style="width:100%; border-collapse:collapse; '
+        'font-variant-numeric:tabular-nums; '
+        'font-family:Inter,-apple-system,sans-serif;">'
+        + head_html + body_html + '</table></div>'
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
+# ============================================================
 # Convenience wrappers
 # ============================================================
-def render_income_statement(df: pd.DataFrame, *, view: ViewMode = "absolute") -> None:
+def render_income_statement(
+    df: pd.DataFrame,
+    *,
+    view: ViewMode = "absolute",
+    quarterly: Optional[pd.DataFrame] = None,
+    show_ttm: bool = True,
+    show_cagr: bool = True,
+) -> None:
+    if df is None or df.empty:
+        st.info("No income statement data available.")
+        return
+    if view == "hybrid":
+        ttm = compute_ttm_income(quarterly) if (show_ttm and quarterly is not None) else None
+        _render_hybrid(
+            df, layout=INCOME_STATEMENT_LAYOUT,
+            table_label="INCOME STATEMENT ($USD)",
+            ttm=ttm, show_ttm=show_ttm, show_cagr=show_cagr,
+        )
+        return
     render_financial_table(
         df, order=INCOME_STATEMENT_ORDER, view=view,
         base_keys=("revenue",),
     )
 
 
-def render_balance_sheet(df: pd.DataFrame, *, view: ViewMode = "absolute") -> None:
+def render_balance_sheet(
+    df: pd.DataFrame,
+    *,
+    view: ViewMode = "absolute",
+    quarterly: Optional[pd.DataFrame] = None,
+    show_ttm: bool = True,
+    show_cagr: bool = True,
+) -> None:
+    if df is None or df.empty:
+        st.info("No balance sheet data available.")
+        return
+    if view == "hybrid":
+        ttm = compute_ttm_balance(quarterly) if (show_ttm and quarterly is not None) else None
+        _render_hybrid(
+            df, layout=BALANCE_SHEET_LAYOUT,
+            table_label="BALANCE SHEET ($USD)",
+            ttm=ttm, show_ttm=show_ttm, show_cagr=show_cagr,
+        )
+        return
     render_financial_table(
         df, order=BALANCE_SHEET_ORDER, view=view,
         base_keys=("totalAssets",),
     )
 
 
-def render_cash_flow(df: pd.DataFrame, *, view: ViewMode = "absolute") -> None:
+def render_cash_flow(
+    df: pd.DataFrame,
+    *,
+    view: ViewMode = "absolute",
+    quarterly: Optional[pd.DataFrame] = None,
+    show_ttm: bool = True,
+    show_cagr: bool = True,
+) -> None:
+    if df is None or df.empty:
+        st.info("No cash flow data available.")
+        return
+    if view == "hybrid":
+        ttm = compute_ttm_cash(quarterly) if (show_ttm and quarterly is not None) else None
+        _render_hybrid(
+            df, layout=CASH_FLOW_LAYOUT,
+            table_label="CASH FLOW ($USD)",
+            ttm=ttm, show_ttm=show_ttm, show_cagr=show_cagr,
+        )
+        return
     render_financial_table(
         df, order=CASH_FLOW_ORDER, view=view,
         base_keys=("revenue",),                  # CF / revenue is conventional

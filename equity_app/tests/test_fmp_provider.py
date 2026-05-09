@@ -68,6 +68,39 @@ class TestHelpers:
         assert info["beta"] == 1.20
         assert info["currency"] == "USD"
 
+    def test_dividend_yield_computed_from_lastdiv_and_price(self):
+        """Bug regression: dividendYield must be a yield (decimal),
+        not the raw lastDiv dollar amount.
+
+        AAPL pays $0.96 dividend at $230.50 price → ~0.42% yield.
+        The bug stored 0.96 directly, producing a 96% yield in the UI.
+        """
+        info = _profile_to_info({
+            "companyName": "Apple Inc.",
+            "price": 230.50,
+            "mktCap": 3.5e12,
+            "lastDiv": 0.96,
+        })
+        assert info["lastDividend"] == 0.96
+        assert info["dividendYield"] == pytest.approx(0.96 / 230.50, rel=1e-6)
+        assert info["dividendYield"] < 0.01  # less than 1% — sane
+
+    def test_dividend_yield_none_when_no_dividend(self):
+        info = _profile_to_info({
+            "companyName": "Tesla Inc.",
+            "price": 250.0,
+            "mktCap": 800e9,
+        })
+        assert info["lastDividend"] is None
+        assert info["dividendYield"] is None
+
+    def test_dividend_yield_none_when_price_missing(self):
+        info = _profile_to_info({
+            "companyName": "Foo",
+            "lastDiv": 1.0,
+        })
+        assert info["dividendYield"] is None
+
 
 # ============================================================
 # fetch_quote

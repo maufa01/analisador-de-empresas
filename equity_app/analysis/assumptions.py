@@ -47,7 +47,7 @@ class Assumptions:
     stage1_years: int = int(DCF_DEFAULTS["stage1_years"])
     stage2_years: int = int(DCF_DEFAULTS["stage2_years"])
     terminal_growth: float = float(DCF_DEFAULTS["terminal_growth"])
-    override_growth: float = 0.0           # 0 ⇒ use historical CAGR
+    override_growth: Optional[float] = None     # None ⇒ use historical CAGR
 
     # ---- Monte Carlo ----
     mc_n_simulations: int = int(MONTE_CARLO_DEFAULTS["n_simulations"])
@@ -258,7 +258,8 @@ def apply_preset(base: Assumptions, preset: str) -> Assumptions:
             base,
             warnings=list(base.warnings),
             override_growth=(
-                base.override_growth * 1.5 if base.override_growth else 0.0
+                base.override_growth * 1.5
+                if base.override_growth is not None else None
             ),
             risk_free=max(0.0, base.risk_free - 0.005),
             equity_risk_premium=max(0.01, base.equity_risk_premium - 0.005),
@@ -273,7 +274,8 @@ def apply_preset(base: Assumptions, preset: str) -> Assumptions:
             base,
             warnings=list(base.warnings),
             override_growth=(
-                base.override_growth * 0.5 if base.override_growth else 0.0
+                base.override_growth * 0.5
+                if base.override_growth is not None else None
             ),
             risk_free=base.risk_free + 0.005,
             equity_risk_premium=base.equity_risk_premium + 0.005,

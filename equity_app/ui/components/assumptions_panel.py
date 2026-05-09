@@ -169,12 +169,18 @@ def render_assumptions_panel(
     """
     preset_key = f"preset_{ticker}"
 
-    # ---- Preset selector + counter ----
-    psel_l, psel_r = st.columns([3, 2])
-    with psel_l:
+    # ---- Preset selector — collapsed by default (P10.4). The Base case
+    # radio is the 99% path; Bull / Bear / Custom only when the user
+    # explicitly opens the expander to compare scenarios.
+    counter_slot = st.empty()
+    with st.expander("⚙ Advanced — multi-scenario (Bull / Bear / Custom)",
+                     expanded=False):
+        st.caption(
+            "Default is the **Base case**. Switch to Bull / Bear to "
+            "stress assumptions ±20% growth and margins. Custom unlocks "
+            "every individual slider below."
+        )
         preset = render_preset_selector(default="Base case", key=preset_key)
-    with psel_r:
-        counter_slot = st.empty()
 
     # Apply non-Custom preset
     if preset != "Custom":
@@ -309,7 +315,8 @@ def render_assumptions_panel(
             unsafe_allow_html=True,
         )
 
-        use_custom = current.override_growth != 0.0
+        # override_growth is Optional[float]: None ⇒ use historical CAGR.
+        use_custom = current.override_growth is not None
         choice = st.radio(
             "growth_choice",
             options=("Use historical FCF CAGR", "Override with custom growth"),
@@ -319,11 +326,11 @@ def render_assumptions_panel(
         )
 
         if choice == "Use historical FCF CAGR":
-            new_g1 = 0.0
+            new_g1 = None
             st.caption("Stage-1 growth derived from realised FCF CAGR (clipped to ±30%).")
         else:
             seed = (float(current.override_growth)
-                    if current.override_growth != 0.0 else 0.05)
+                    if current.override_growth is not None else 0.05)
             new_g1 = st.slider(
                 _label("Custom stage-1 growth (annualised)",
                        modified="override_growth" in diff),
@@ -477,7 +484,7 @@ def render_assumptions_panel(
         stage1_years=int(new_s1),
         stage2_years=int(new_s2),
         terminal_growth=float(new_g_t),
-        override_growth=float(new_g1),
+        override_growth=(None if new_g1 is None else float(new_g1)),
         mc_n_simulations=int(new_n),
         mc_rev_growth_std=float(new_revstd),
         mc_wacc_std=float(new_wstd),

@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from analysis.working_capital import CCCResult
+from core.formatters import safe_fmt
 from ui.theme import (
     SURFACE, BORDER, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED,
     ACCENT, GAINS, LOSSES,
@@ -111,7 +112,30 @@ def _build_ccc_figure(history: pd.DataFrame, height: int = 280) -> go.Figure:
 
 
 def render_ccc_dashboard(result: CCCResult) -> None:
-    """Component cards + history chart + interpretation."""
+    """Component cards + history chart + interpretation.
+
+    Renders an "n/a" notice (instead of the full dashboard) when CCC
+    couldn't be computed — typical for utilities / software / financials
+    where there's no inventory cycle to track. P12.A2 fix.
+    """
+    # Empty-state: utilities, banks, software-only have no CCC.
+    if (result is None
+            or result.current_ccc is None
+            or result.avg_5y_ccc is None
+            or result.history is None
+            or result.history.empty):
+        st.markdown(
+            '<div class="eq-card" '
+            'style="padding:14px 18px; color:var(--text-muted); '
+            'font-size:12px;">'
+            '<b>Cash Conversion Cycle is not applicable.</b><br>'
+            'Typical for utilities / software / financials — there is '
+            'no inventory cycle to measure.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
     # ---- 3 component cards ----
     history = result.history
     prev_dso = history["DSO"].iloc[-2] if len(history) >= 2 else None
@@ -163,7 +187,7 @@ def render_ccc_dashboard(result: CCCResult) -> None:
         f'<span style="color:var(--text-muted); font-size:12px; '
         f'margin-left:14px;">Industry avg ~'
         f'<b style="color:var(--text-secondary);">'
-        f'{result.industry_avg_ccc:.0f}d</b></span>'
+        f'{safe_fmt(result.industry_avg_ccc, ".0f")}d</b></span>'
         if result.industry_avg_ccc is not None else ""
     )
 
@@ -178,7 +202,7 @@ def render_ccc_dashboard(result: CCCResult) -> None:
         f'color:{ccc_color}; font-variant-numeric:tabular-nums;">{ccc_text}</span>'
         f'<span style="color:var(--text-muted); font-size:12px;">'
         f'5y avg <b style="color:var(--text-secondary);">'
-        f'{result.avg_5y_ccc:.0f}d</b></span>'
+        f'{safe_fmt(result.avg_5y_ccc, ".0f")}d</b></span>'
         f'{industry_html}'
         '</div>'
         f'<div style="margin-top:10px; color:var(--text-secondary); '

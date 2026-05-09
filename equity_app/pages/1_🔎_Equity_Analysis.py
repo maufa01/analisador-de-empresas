@@ -30,7 +30,7 @@ import streamlit as st
 
 from analysis.assumptions import Assumptions, calculate_default_assumptions
 from analysis.ratios import calculate_ratios
-from analysis.earnings_quality import assess_earnings_quality
+from analysis.quality import assess_earnings_quality
 from core.exceptions import ValuationError, InsufficientDataError
 from core.valuation_pipeline import run_valuation
 from data.constituents import META as TICKER_META
@@ -84,46 +84,12 @@ from analysis.data_adapter import (
 )
 
 
-def _fetch_live_peers(ticker: str, sector: Optional[str]) -> list[PeerSnapshot]:
-    """Best-effort peer roster from FMP. Returns [] when no key / no peers."""
-    try:
-        from data.fmp_provider import FMPProvider
-        from core.exceptions import MissingAPIKeyError, ProviderError
-    except Exception:
-        return []
-    try:
-        prov = FMPProvider()
-    except MissingAPIKeyError:
-        return []
-    except Exception:
-        return []
-    try:
-        peers = prov.fetch_peers(ticker) or []
-    except (MissingAPIKeyError, ProviderError):
-        return []
-    except Exception:
-        return []
-    out: list[PeerSnapshot] = []
-    for p in peers[:6]:
-        # FMP fetch_peers returns dicts with at least 'symbol' and basic stats
-        if isinstance(p, str):
-            out.append(PeerSnapshot(p))
-            continue
-        if not isinstance(p, dict):
-            continue
-        sym = p.get("symbol") or p.get("ticker")
-        if not sym:
-            continue
-        out.append(PeerSnapshot(
-            ticker=sym,
-            market_cap=p.get("marketCap") or p.get("mktCap"),
-            enterprise_value=p.get("enterpriseValue"),
-            net_income=p.get("netIncomeTTM") or p.get("netIncome"),
-            revenue=p.get("revenueTTM") or p.get("revenue"),
-            ebitda=p.get("ebitdaTTM") or p.get("ebitda"),
-            book_value=p.get("totalEquity") or p.get("bookValue"),
-        ))
-    return out
+# Legacy ``_fetch_live_peers`` (FMP-only, no fallback) was removed in
+# P10.8 — it was already shadowed by ``data.peer_resolver.fetch_live_peers``
+# (cascading FMP → S&P-500 META → SECTOR_DEFAULT_PEERS) which is what
+# load_bundle() actually calls. Keeping the legacy function around just
+# pulled in a useless ``MissingAPIKeyError`` warning chain on every page
+# load when no FMP key is set.
 
 
 # ============================================================
@@ -201,12 +167,47 @@ with back_r:
             add_to_watchlist(active_ticker)
         st.rerun()
 
+# Macro context strip — one thin row of 10Y / Fed funds / CPI / unemp
+# (P11.A1 replacement for the full Macro page). Cached 1h, silent no-op
+# without FRED_API_KEY.
+from ui.components.macro_context_strip import render_macro_strip
+render_macro_strip()
+
 # Compact secondary inputs row — lets the user switch ticker without
 # returning to the landing. (The old comma-separated peers field has
 # been removed; peer comparison now lives in the Overview tab as the
 # Price Comparison panel — search, add, remove, time range, normalised
 # vs absolute, performance summary.)
-_LABELS: list[str] = ticker_labels(SP500_TOP)
+# Pre-filter the dropdown to operating companies (P12.B3) — utilities,
+# REITs, banks, insurers, BDCs, MLPs, ETFs are still analysable via the
+# direct text input (with the soft-block warning), but they don't
+# clutter the SP500_TOP picklist.
+from analysis.security_classifier import is_operating_company
+from analysis.etf_detector import is_fund_quick
+from analysis.reit_detector import is_reit_quick
+from analysis.bank_detector import is_bank_quick
+from data.constituents import META as _TICKER_META
+
+
+def _is_excluded_from_dropdown(sym: str, name: str) -> bool:
+    """Belt-and-suspenders filter — security_classifier already excludes
+    most non-operating tickers, but the explicit single-purpose detectors
+    (P13/P14) cover edge cases where industry strings are missing."""
+    if is_fund_quick(sym) or is_reit_quick(sym) or is_bank_quick(sym):
+        return True
+    return not is_operating_company(
+        sym,
+        sector=_TICKER_META.get(sym, {}).get("sector"),
+        industry=_TICKER_META.get(sym, {}).get("industry"),
+        name=name,
+    )
+
+
+_OPERATING_SP500: dict[str, str] = {
+    sym: name for sym, name in SP500_TOP.items()
+    if not _is_excluded_from_dropdown(sym, name)
+}
+_LABELS: list[str] = ticker_labels(_OPERATING_SP500)
 ic1, ic2, ic3 = st.columns([0.9, 5.5, 1.4])
 with ic1:
     use_custom = st.toggle(
@@ -256,46 +257,64 @@ if maybe_render_non_standard_view(_resolved):
 # If a downstream fetch (price, company info, financials) flakes,
 # its own try/except below produces a specific, accurate error.
 
+# ---- Parallel hydration via load_bundle (4 fetches in parallel + ----
+# ---- peers + income healing, cached 10 min per ticker) -------------
+from analysis.parallel_loader import load_bundle
+
 with st.spinner(f"Fetching {active_ticker} live data…"):
-    try:
-        live_info = _live_get_company_info(active_ticker)
-    except DataSourceError as exc:
-        st.error(f"❌ Could not fetch company info for {active_ticker}.")
-        st.caption(f"Providers tried: {', '.join(exc.providers_tried)}")
-        st.stop()
+    bundle = load_bundle(active_ticker)
 
-    try:
-        live_quote = _live_get_current_price(active_ticker)
-    except DataSourceError as exc:
-        st.error(f"❌ Could not fetch a current price for {active_ticker}.")
-        st.caption(f"Providers tried: {', '.join(exc.providers_tried)}")
-        st.stop()
+# Friendly errors for the most common failure modes — render structured
+# per-provider details when DataSourceError carries .attempts.
+from ui.components.provider_error_panel import render_provider_error_panel
 
-    try:
-        bundle = _live_require_financials(active_ticker)
-    except DataSourceError as exc:
-        st.error(
-            f"❌ Could not fetch financial statements for {active_ticker} "
-            f"from any provider."
-        )
-        st.caption(
-            f"Providers tried: {', '.join(exc.providers_tried)}. "
-            "SEC EDGAR is the most reliable — make sure SEC_USER_AGENT is set."
-        )
-        st.stop()
+def _bundle_attempts(name: str):
+    exc = bundle.exceptions.get(name)
+    return getattr(exc, "attempts", None) if exc is not None else None
 
+if not bundle.quote and "quote" in bundle.errors:
+    render_provider_error_panel(
+        title=f"Could not fetch a current price for {active_ticker}.",
+        message=str(bundle.exceptions.get("quote")
+                    or bundle.errors.get("quote", "")),
+        attempts=_bundle_attempts("quote"),
+    )
+    st.stop()
+if not bundle.info and "info" in bundle.errors:
+    render_provider_error_panel(
+        title=f"Could not fetch company info for {active_ticker}.",
+        message=str(bundle.exceptions.get("info")
+                    or bundle.errors.get("info", "")),
+        attempts=_bundle_attempts("info"),
+    )
+    st.stop()
+if bundle.income.empty:
+    err_reason = bundle.errors.get("financials", "no provider returned data")
+    st.error(
+        f"❌ Could not fetch financial statements for {active_ticker} "
+        f"from any provider."
+    )
+    st.caption(
+        f"Reason: {err_reason}. SEC EDGAR is the most reliable — make "
+        "sure SEC_USER_AGENT is set."
+    )
+    st.stop()
+
+# Aliases the rest of the page already uses — keep so we don't have to
+# rewrite every component below.
+live_info = bundle.info
+live_quote = bundle.quote
 inc, bal, cf = bundle.income, bundle.balance, bundle.cash
 ratios = calculate_ratios(inc, bal, cf)
 eq = assess_earnings_quality(inc, bal, cf)
 
-# Single source of truth for everything the page needs from "info"
-sector = live_info.get("sector") or live_info.get("industry")
-current_price = float(live_quote["price"])
-market_cap_live = live_info.get("market_cap")
+sector = bundle.sector or live_info.get("industry")
+current_price = float(live_quote.get("price") or 0.0)
+market_cap_live = bundle.market_cap
 w52_low = live_info.get("fifty_two_week_low")
 w52_high = live_info.get("fifty_two_week_high")
 daily_change_pct = float(live_quote.get("change_pct") or 0.0)
-peers_demo = _fetch_live_peers(active_ticker, sector)
+peers_demo = bundle.peers
 
 
 # ============================================================
@@ -318,6 +337,167 @@ if user_state_key in st.session_state:
     current_assumptions = Assumptions.from_dict(st.session_state[user_state_key])
 else:
     current_assumptions = base_assumptions
+
+
+# ============================================================
+# Hard blocks (P13 / P14) — fund / REIT / bank get a definitive stop
+# with a sector-specific explanation BEFORE the broader soft-block. No
+# override here: these three categories have well-known alternative
+# valuation models that would mislead the user if we let them through.
+# ============================================================
+from analysis.etf_detector import detect_fund
+from analysis.reit_detector import detect_reit
+from analysis.bank_detector import detect_bank
+
+
+def _ref_metric_row(metrics: list[tuple[str, str]]) -> None:
+    cols = st.columns(len(metrics))
+    for col, (label, value) in zip(cols, metrics):
+        col.metric(label, value)
+
+
+# ---- ETF / fund ----
+_fund_check = detect_fund(active_ticker, bundle.fmp_profile, live_info)
+if _fund_check.is_fund:
+    st.error(
+        f"🚫 **{active_ticker}** is a fund / ETF.\n\n"
+        f"This app analyses **operating companies**, not investment "
+        f"vehicles. Valuation models (DCF, comparables, Monte Carlo) do "
+        f"not apply to funds — their value is the sum of the holdings' "
+        f"NAV, not generated FCF.\n\n"
+        f"Detection: `{_fund_check.method}` "
+        f"({_fund_check.confidence*100:.0f}% confidence) — {_fund_check.detail}\n\n"
+        f"For ETF analysis: etfdb.com (overlap, expense ratio, holdings), "
+        f"Morningstar (fund-level metrics), your broker (NAV vs price)."
+    )
+    st.markdown("---")
+    st.markdown("### Quick reference")
+    _refs: list[tuple[str, str]] = []
+    _price = (bundle.quote or {}).get("price")
+    if _price:
+        _refs.append(("Current price", f"${float(_price):.2f}"))
+    _lo = (live_info or {}).get("fiftyTwoWeekLow") or (live_info or {}).get("fifty_two_week_low")
+    _hi = (live_info or {}).get("fiftyTwoWeekHigh") or (live_info or {}).get("fifty_two_week_high")
+    if _lo and _hi:
+        _refs.append(("52w range", f"${float(_lo):.2f} – ${float(_hi):.2f}"))
+    if _refs:
+        _ref_metric_row(_refs)
+    st.stop()
+
+
+# ---- REIT ----
+_reit_check = detect_reit(active_ticker, bundle.fmp_profile, live_info)
+if _reit_check.is_reit:
+    st.error(
+        f"🚫 **{active_ticker}** is a **REIT** (Real Estate Investment Trust).\n\n"
+        f"FCFF DCF **does not apply** to REITs because they are required "
+        f"by law to distribute ≥90% of net income — they don't accumulate "
+        f"capital. The DCF will produce nonsense values (typically 4–10× "
+        f"the real price).\n\n"
+        f"💡 **Use instead:** P/FFO (Funds From Operations), P/AFFO "
+        f"(Adjusted FFO net of maintenance capex), dividend yield vs "
+        f"sub-sector peers, or NAV per share.\n\n"
+        f"Detection: `{_reit_check.method}` "
+        f"({_reit_check.confidence*100:.0f}% confidence) — {_reit_check.detail}"
+    )
+    st.markdown("---")
+    st.markdown("### Quick reference")
+    _refs = []
+    _price = (bundle.quote or {}).get("price")
+    if _price:
+        _refs.append(("Current price", f"${float(_price):.2f}"))
+    _div = (live_info or {}).get("dividendYield")
+    if _div:
+        _refs.append(("Dividend yield", f"{float(_div)*100:.2f}%"))
+    _mcap = (live_info or {}).get("marketCap") or (bundle.fmp_profile or {}).get("mktCap")
+    if _mcap:
+        _refs.append(("Market cap", f"${float(_mcap)/1e9:.1f}B"))
+    if _refs:
+        _ref_metric_row(_refs)
+    st.stop()
+
+
+# ---- Bank ----
+_bank_check = detect_bank(active_ticker, bundle.fmp_profile, live_info)
+if _bank_check.is_bank:
+    st.error(
+        f"🚫 **{active_ticker}** is a **bank**.\n\n"
+        f"Banks can't be valued with FCFF DCF: their balance sheet is "
+        f"dominated by deposits and loans (not working capital), 'free "
+        f"cash flow' is not comparable to operating companies (their "
+        f"business *is* the balance sheet), and optimal leverage is "
+        f"regulated, not a management decision.\n\n"
+        f"💡 **Use instead:** P/TBV (Price / Tangible Book Value — the "
+        f"standard multiple), P/E adjusted by credit cycle, Residual "
+        f"Income model, or DDM for stable-payout banks. Bank-specific "
+        f"metrics: NIM, efficiency ratio, NPL ratio, CET1, ROE.\n\n"
+        f"Detection: `{_bank_check.method}` "
+        f"({_bank_check.confidence*100:.0f}% confidence) — {_bank_check.detail}"
+    )
+    st.markdown("---")
+    st.markdown("### Quick reference")
+    _refs = []
+    _price = (bundle.quote or {}).get("price")
+    if _price:
+        _refs.append(("Current price", f"${float(_price):.2f}"))
+    _pe = (live_info or {}).get("trailingPE")
+    if _pe:
+        _refs.append(("P/E (TTM)", f"{float(_pe):.1f}"))
+    _pb = (live_info or {}).get("priceToBook")
+    if _pb:
+        _refs.append(("P/B", f"{float(_pb):.2f}"))
+    if _refs:
+        _ref_metric_row(_refs)
+    st.stop()
+
+
+# ============================================================
+# Soft-block (P12.B2) — utility / insurance / BDC / MLP / royalty trust
+# get a warning + override checkbox. Funds / REITs / banks already
+# stopped above; the dict entries for them remain as a safety net in
+# case a new path slips around the hard blocks.
+# ============================================================
+from analysis.security_classifier import classify_security, SecurityType
+
+_sec_class = classify_security(
+    ticker=active_ticker,
+    sector=live_info.get("sector") if live_info else None,
+    industry=live_info.get("industry") if live_info else None,
+    name=live_info.get("name") if live_info else None,
+)
+SHOW_VALUATION = True
+if not _sec_class.valuation_applicable:
+    _type_label = {
+        SecurityType.UTILITY:       "regulated utility",
+        SecurityType.REIT:          "REIT",
+        SecurityType.BANK:          "bank",
+        SecurityType.INSURANCE:     "insurance company",
+        SecurityType.BDC:           "BDC",
+        SecurityType.MLP:           "MLP",
+        SecurityType.FUND:          "ETF / fund",
+        SecurityType.ROYALTY_TRUST: "royalty trust",
+    }.get(_sec_class.security_type, "non-operating security")
+
+    st.warning(
+        f"🚧 **{active_ticker}** looks like a **{_type_label}** "
+        f"({_sec_class.confidence*100:.0f}% confidence). "
+        f"{_sec_class.reason}\n\n"
+        f"The FCFF DCF model in this app **does not apply correctly** "
+        f"to this kind of security and would produce misleading intrinsic "
+        f"values.\n\n"
+        f"💡 **Suggested approach:** "
+        f"{_sec_class.suggested_alternative or 'Use sector-specific tools.'}"
+    )
+    _override = st.checkbox(
+        "Show financial statements only (skip valuation)",
+        value=False,
+        key=f"sec_override_{active_ticker}",
+        help="Statements still show real numbers; only the intrinsic-value "
+             "engines are unreliable for this security type.",
+    )
+    if not _override:
+        st.stop()
+    SHOW_VALUATION = False
 
 
 # ============================================================
@@ -344,6 +524,44 @@ upside = None
 if (results.aggregator and np.isfinite(results.aggregator.intrinsic_per_share)
         and current_price and current_price > 0):
     upside = (results.aggregator.intrinsic_per_share - current_price) / current_price
+
+# Compute market-implied stage-1 growth once — the Valuation tab card
+# renders this number; the snapshot DB stores it so we have a record
+# of what the market was pricing at each visit.
+_implied_growth_value: float | None = None
+try:
+    from valuation.reverse_dcf import run_reverse_dcf
+    if (current_price and current_price > 0
+            and results.wacc and not inc.empty):
+        _ig_res = run_reverse_dcf(
+            income=inc, balance=bal, cash=cf,
+            target_price=float(current_price),
+            wacc=results.wacc.wacc,
+            terminal_growth=current_assumptions.terminal_growth,
+            stage1_years=current_assumptions.stage1_years,
+            stage2_years=current_assumptions.stage2_years,
+        )
+        if _ig_res and _ig_res.implied_growth is not None and np.isfinite(_ig_res.implied_growth):
+            _implied_growth_value = float(_ig_res.implied_growth)
+except Exception:
+    _implied_growth_value = None
+
+# Auto-snapshot of analysis state (P11.B4 + P7.7). Dedupe by financials
+# hash — re-opening the same ticker in the same day is a no-op. New
+# snapshot only when SEC ships a restatement or financials roll forward.
+try:
+    from data.snapshot_db import save_snapshot
+    save_snapshot(
+        ticker=active_ticker,
+        bundle=bundle,
+        intrinsic=(results.aggregator.intrinsic_per_share
+                   if results.aggregator
+                   and np.isfinite(results.aggregator.intrinsic_per_share)
+                   else None),
+        implied_growth=_implied_growth_value,
+    )
+except Exception:
+    pass
 
 # Persist score/rating into watchlist meta so the alert checker can detect
 # score changes the next time it runs.
@@ -399,7 +617,7 @@ _price_chip = source_chip(
     is_realtime=bool(live_quote.get("is_realtime")),
 )
 _info_chip = source_chip(live_info.get("source", "—"))
-_fin_chip = source_chip(bundle.source if bundle else "—")
+_fin_chip = source_chip(bundle.financials_source if bundle else "—")
 st.markdown(
     '<div style="display:flex; gap:18px; flex-wrap:wrap; '
     'margin:6px 0 14px 0; padding:8px 14px; background:var(--surface); '
@@ -422,7 +640,11 @@ from ui.components.company_profile import render_company_profile
 from ui.components.competitive_landscape import render_competitive_landscape
 
 st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-render_company_profile(active_ticker)
+render_company_profile(
+    active_ticker,
+    live_info=bundle.info,
+    fmp_profile=bundle.fmp_profile,
+)
 
 st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 st.markdown(
@@ -519,10 +741,10 @@ if peers_demo:
 # ============================================================
 st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
-(tab_overview, tab_valuation, tab_financials, tab_ratios,
+(tab_overview, tab_valuation, tab_financials, tab_forecast, tab_ratios,
  tab_quality, tab_peers, tab_capital, tab_insiders,
  tab_charts) = st.tabs([
-    "Overview", "Valuation", "Financials", "Ratios",
+    "Overview", "Valuation", "Financials", "Forecast", "Ratios",
     "Quality", "Peers", "Capital allocation", "Insiders",
     "Charts",
 ])
@@ -530,6 +752,24 @@ st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
 # ---- Overview ----
 with tab_overview:
+    # ---- 0. Company context card (one-glance summary) ----
+    from ui.components.company_context_card import render_company_context_card
+    render_company_context_card(
+        ticker=active_ticker,
+        name=(live_info.get("name")
+              or live_info.get("longName")
+              or TICKER_META.get(active_ticker, {}).get("name")),
+        sector=(live_info.get("sector")
+                or TICKER_META.get(active_ticker, {}).get("sector")),
+        industry=(live_info.get("industry")
+                  or TICKER_META.get(active_ticker, {}).get("industry")),
+        description=(live_info.get("longBusinessSummary")
+                     or live_info.get("description")
+                     or (bundle.fmp_profile or {}).get("description")),
+        peers=[p.ticker for p in (peers_demo or [])],
+    )
+    st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+
     # ---- Next earnings card (Finnhub, only if ≤60 days away) ----
     from ui.components.next_earnings_card import render_next_earnings_card
     render_next_earnings_card(active_ticker, horizon_days=60)
@@ -699,27 +939,10 @@ with tab_overview:
     div_res = analyze_dividend_safety(income=inc, balance=bal, cash=cf)
     render_dividend_safety_card(div_res)
 
-    # ---- News & Sentiment — Marketaux articles + Finnhub insider/analyst ----
-    from ui.components.news_combined_section import render_news_combined_section
-
-    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
-    render_news_combined_section(active_ticker)
-
-    # ---- Legacy yfinance + VADER fallback ----
-    # Keeps working when no Marketaux key — cheap headline-only sentiment.
-    with st.expander("Headline-only sentiment (yfinance + VADER fallback)",
-                     expanded=False):
-        from analysis.news_sentiment import analyze_ticker_news
-        from ui.components.news_sentiment_panel import render_news_sentiment_panel
-        engine_label = st.radio(
-            "sentiment_engine",
-            options=["VADER (fast)", "FinBERT (heavy, finance-tuned)"],
-            index=0, horizontal=True, label_visibility="collapsed",
-            key=f"sent_engine_{active_ticker}",
-        )
-        engine = "finbert" if engine_label.startswith("FinBERT") else "vader"
-        news_res = analyze_ticker_news(active_ticker, limit=30, engine=engine)
-        render_news_sentiment_panel(news_res)
+    # News & Sentiment removed (P10.5) — the user reads news directly
+    # from the source. The components and analyzers (news_combined_section,
+    # news_sentiment, news_sentiment_panel) remain in git for reactivation
+    # if desired.
 
     # ---- Segments + Geography (FMP-only) ----
     from analysis.segments import (
@@ -766,31 +989,9 @@ with tab_overview:
             except Exception:
                 pass
 
-    # ---- AI thesis prompt generator (offline mode) ----
-    from analysis.shareholder_yield import calculate_shareholder_yield as _sy_for_prompt
-    from analysis.ai_thesis_prompt import build_thesis_prompt
-    from ui.components.ai_thesis_panel import render_ai_thesis_panel
-
-    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
-    if st.toggle("AI investment thesis (offline copy-paste)",
-                 value=False, key=f"ai_thesis_toggle_{active_ticker}"):
-        _sy_for_thesis = _sy_for_prompt(
-            cash=cf, market_cap=market_cap_live,
-        )
-        thesis_prompt = build_thesis_prompt(
-            ticker=active_ticker,
-            company_name=company_name,
-            sector=sector_label,
-            industry=TICKER_META.get(active_ticker, {}).get("industry"),
-            market_cap=market_cap_live,
-            current_price=current_price,
-            valuation_results=results,
-            earnings_quality=eq,
-            dividend_safety=div_res,
-            shareholder_yield=_sy_for_thesis,
-            news_sentiment=news_res,
-        )
-        render_ai_thesis_panel(thesis_prompt, ticker=active_ticker)
+    # AI thesis panel disconnected from UI (PROMPT 9 PARTE 3) — modules
+    # `analysis.ai_thesis_prompt` and `ui.components.ai_thesis_panel`
+    # remain in git for future revisit with stricter guardrails.
 
     st.caption(
         "Pending live-data wiring: segments / geography, analyst ratings, "
@@ -801,9 +1002,34 @@ with tab_overview:
 
 # ---- Valuation ----
 with tab_valuation:
+    if not SHOW_VALUATION:
+        st.info(
+            f"Valuation skipped — {active_ticker} is a "
+            f"{_type_label}, the FCFF DCF doesn't apply. "
+            f"💡 {_sec_class.suggested_alternative or ''}"
+        )
+        st.stop()
+
+    # Market-implied growth header card — the page-level _implied_growth_value
+    # was already computed above for the snapshot save, so we re-render
+    # via the same path (the inner reverse_dcf call hits a cheap
+    # short-circuit when called twice in a row).
+    from ui.components.market_implied_growth_card import (
+        render_market_implied_growth_card,
+    )
+    render_market_implied_growth_card(
+        income=inc, balance=bal, cash=cf,
+        current_price=current_price,
+        wacc=results.wacc.wacc if results.wacc else None,
+        terminal_growth=current_assumptions.terminal_growth,
+        stage1_years=current_assumptions.stage1_years,
+        stage2_years=current_assumptions.stage2_years,
+    )
+
     # Per-model cards
     st.markdown(
-        '<div class="eq-section-label">MODEL CONTRIBUTIONS</div>',
+        '<div class="eq-section-label" style="margin-top:18px;">'
+        'MODEL CONTRIBUTIONS</div>',
         unsafe_allow_html=True,
     )
     vc1, vc2, vc3, vc4 = st.columns(4)
@@ -990,7 +1216,7 @@ with tab_valuation:
                      for d in (-0.02, -0.01, 0.0, 0.01, 0.02)]
         g_grid = [round(current_assumptions.terminal_growth + d, 4)
                   for d in (-0.01, -0.005, 0.0, 0.005, 0.01)]
-        g_override = current_assumptions.override_growth or None
+        g_override = current_assumptions.override_growth
         sens = sensitivity_table(
             income=inc, balance=bal, cash=cf,
             wacc_grid=wacc_grid, g_grid=g_grid,
@@ -1065,6 +1291,60 @@ with tab_valuation:
         recession=recession_res, sector=sector_res,
     )
 
+    # ---- Position sizing helper (P11.B3) ----
+    from ui.components.position_sizing_card import render_position_sizing_card
+    render_position_sizing_card(active_ticker, current_price)
+
+    # ---- Multi-multiple forward valuation (cross-check via peers) ----
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="eq-section-label">MULTI-MULTIPLE VALUATION · '
+        'PEERS × FORWARD</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Implied price applying peer-median multiples to your forecast. "
+        "Cross-check to the DCF — divergence between models is signal."
+    )
+    _shares_for_mm = (
+        live_info.get("sharesOutstanding")
+        or live_info.get("shares_outstanding")
+        if isinstance(live_info, dict) else None
+    )
+    if _shares_for_mm and peers_demo:
+        try:
+            from analysis.financial_forecast import (
+                _default_inputs_from_history, project_financials,
+            )
+            from ui.components.multi_multiple_valuation import (
+                render_multi_multiple_valuation_panel,
+            )
+            _mm_inputs = _default_inputs_from_history(inc, bal, cf, years=5)
+            _mm_forecast = project_financials(
+                inc, bal, cf, inputs=_mm_inputs, years=5,
+                shares_outstanding=_shares_for_mm,
+            )
+            render_multi_multiple_valuation_panel(
+                target_ticker=active_ticker,
+                current_price=current_price,
+                forecast_result=_mm_forecast,
+                peer_snapshots=peers_demo,
+                shares_outstanding=_shares_for_mm,
+                discount_rate=0.12,
+            )
+        except Exception as exc:
+            st.warning(f"Multi-multiple valuation failed: {exc}")
+    elif not _shares_for_mm:
+        st.info(
+            "Multi-multiple valuation needs shares outstanding "
+            "(unavailable from the data sources for this ticker)."
+        )
+    else:
+        st.info(
+            "Multi-multiple valuation needs peers — none configured "
+            "for this ticker."
+        )
+
 
 # ---- Financials ----
 with tab_financials:
@@ -1085,15 +1365,28 @@ with tab_financials:
     with fin_l:
         view_mode_label = st.radio(
             "view_mode_pill",
-            options=["Absolute", "Common size", "Growth"],
+            options=["Analyst", "Absolute", "Common size", "Growth"],
             index=0, horizontal=True, label_visibility="collapsed",
             key=f"fin_view_{active_ticker}",
         )
     view_mode = {
+        "Analyst":      "hybrid",
         "Absolute":     "absolute",
         "Common size":  "common_size",
         "Growth":       "growth",
     }[view_mode_label]
+
+    # Quarterly statements for TTM column (hybrid view only)
+    inc_q = bal_q = cf_q = None
+    if view_mode == "hybrid":
+        try:
+            from data.fmp_provider import FMPProvider
+            _fmp = FMPProvider()
+            inc_q = _fmp.fetch_income_statement_quarterly(active_ticker)
+            bal_q = _fmp.fetch_balance_sheet_quarterly(active_ticker)
+            cf_q = _fmp.fetch_cash_flow_quarterly(active_ticker)
+        except Exception:
+            pass            # TTM cells will render as "—"
 
     with fin_r2:
         try:
@@ -1123,7 +1416,7 @@ with tab_financials:
         build_income_chart(inc, height=200),
         use_container_width=True, config={"displayModeBar": False},
     )
-    render_income_statement(inc, view=view_mode)
+    render_income_statement(inc, view=view_mode, quarterly=inc_q)
 
     # ---- Balance Sheet ----
     st.markdown(
@@ -1135,7 +1428,7 @@ with tab_financials:
         build_balance_chart(bal, height=200),
         use_container_width=True, config={"displayModeBar": False},
     )
-    render_balance_sheet(bal, view=view_mode)
+    render_balance_sheet(bal, view=view_mode, quarterly=bal_q)
 
     # ---- Cash Flow ----
     st.markdown(
@@ -1147,7 +1440,7 @@ with tab_financials:
         build_fcf_chart(cf, income=inc, height=200),
         use_container_width=True, config={"displayModeBar": False},
     )
-    render_cash_flow(cf, view=view_mode)
+    render_cash_flow(cf, view=view_mode, quarterly=cf_q)
 
     # ---- Financial Ratios (kept as st.dataframe — already legible) ----
     st.markdown(
@@ -1182,6 +1475,28 @@ with tab_financials:
     st.dataframe(transposed.round(2), use_container_width=True, height=440)
 
 
+# ---- Forecast ----
+@st.fragment
+def _forecast_tab_fragment(inc, bal, cf, live_info, current_price):
+    """st.fragment isolates this tab's re-renders from the rest of the
+    page. Moving a slider on the DCF panel won't recompute the forecast
+    here, and vice versa. Big perf win on the heavier tabs."""
+    from ui.components.forecast_panel import render_forecast_panel
+    _shares = None
+    if isinstance(live_info, dict):
+        _shares = (live_info.get("sharesOutstanding")
+                   or live_info.get("shares_outstanding"))
+    render_forecast_panel(
+        income=inc, balance=bal, cash=cf,
+        shares_outstanding=_shares,
+        current_price=current_price,
+    )
+
+
+with tab_forecast:
+    _forecast_tab_fragment(inc, bal, cf, live_info, current_price)
+
+
 # ---- Ratios ----
 with tab_ratios:
     # ---- SEC-driven Ratio Engine (primary view, US-listed tickers) ----
@@ -1214,28 +1529,62 @@ with tab_ratios:
 
 
 # ---- Quality ----
-with tab_quality:
-    from ui.components.eq_score_card import render_earnings_quality_detail
-    from ui.components.red_flags_comparison import render_red_flags_comparison
-
-    if any(f is not None for f in (eq.beneish, eq.piotroski, eq.sloan)):
-        render_earnings_quality_detail(eq)
-        st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-        render_red_flags_comparison(active_ticker, eq)
-    else:
-        st.info("Earnings-quality models could not be computed for this fixture.")
-
-    # ---- Balance-sheet forensics ----
-    from analysis.balance_sheet_quality import analyze_balance_sheet_quality
+@st.fragment
+def _quality_tab_fragment(inc, bal, cf, eq, active_ticker, sector_label):
+    """Quality tab is one of the heaviest (Beneish/Piotroski/Sloan +
+    BS forensics + revenue quality + earnings volatility + ESG fetch).
+    Wrapping in @st.fragment isolates re-renders so a slider move on
+    the DCF panel doesn't recompute every model here."""
+    from ui.components.quality_checklist_card import render_quality_checklist
     from ui.components.balance_sheet_forensics_card import render_balance_sheet_forensics
+    from ui.components.revenue_quality_card import render_revenue_quality_card
+    from ui.components.earnings_volatility_card import render_earnings_volatility_card
+    from ui.components.esg_panel import render_esg_panel
+    from ui.components.forensic_flags_card import render_forensic_flags
+    from analysis.forensics import run_all_checks
+    from analysis.quality import (
+        analyze_balance_sheet_quality, analyze_revenue_quality,
+    )
+    from analysis.earnings_volatility import analyze_earnings_volatility
+
+    # Forensic flags first — this is the "what should worry me?" view.
+    # Empty list renders the "all clear" green banner (P7.4).
+    render_forensic_flags(run_all_checks(inc, bal, cf))
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+
+    # Phil-Town / Pat-Dorsey style quality checklist (positives view)
+    render_quality_checklist(inc, bal, cf)
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+
+    # Sloan ratio (accruals quality) is one number, easy to read. Beneish +
+    # Piotroski were dropped in P11.A4 — the analysis code stays in
+    # earnings_quality.py so callers can still invoke them programmatically,
+    # but the academic-card UI is gone (Quality Checklist + forensic flags
+    # cover the same ground in plain English).
+    if eq.sloan is not None:
+        sloan_color = ("#10B981" if eq.sloan.flag == "green"
+                       else "#B87333" if eq.sloan.flag == "yellow"
+                       else "#DC2626")
+        st.markdown(
+            '<div style="background:var(--surface); border-left:3px solid '
+            f'{sloan_color}; padding:12px 16px; border-radius:6px; '
+            'margin-top:14px;">'
+            '<div style="color:var(--text-muted); font-size:11px; '
+            'text-transform:uppercase; letter-spacing:0.6px;">'
+            'Sloan accruals ratio</div>'
+            f'<div style="color:var(--text-primary); font-size:18px; '
+            f'font-weight:500; margin-top:4px; '
+            f'font-variant-numeric:tabular-nums;">{eq.sloan.score:.3f}</div>'
+            '<div style="color:var(--text-secondary); font-size:11px; '
+            'margin-top:4px;">Higher accruals → more "paper" earnings vs '
+            'cash. Threshold ±0.10 is the conventional flag.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
     st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
     bs_res = analyze_balance_sheet_quality(income=inc, balance=bal)
     render_balance_sheet_forensics(bs_res)
-
-    # ---- Revenue quality ----
-    from analysis.revenue_quality import analyze_revenue_quality
-    from ui.components.revenue_quality_card import render_revenue_quality_card
 
     industry_label = TICKER_META.get(active_ticker, {}).get("industry")
     st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
@@ -1244,17 +1593,15 @@ with tab_quality:
     )
     render_revenue_quality_card(rev_q)
 
-    # ---- Earnings volatility (compounder vs cyclical) ----
-    from analysis.earnings_volatility import analyze_earnings_volatility
-    from ui.components.earnings_volatility_card import render_earnings_volatility_card
-
     st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
-    ev = analyze_earnings_volatility(income=inc)
-    render_earnings_volatility_card(ev)
+    ev_res = analyze_earnings_volatility(income=inc)
+    render_earnings_volatility_card(ev_res)
 
-    # ---- ESG scores (Finnhub) — last so it's optional in the visual hierarchy ----
-    from ui.components.esg_panel import render_esg_panel
     render_esg_panel(active_ticker)
+
+
+with tab_quality:
+    _quality_tab_fragment(inc, bal, cf, eq, active_ticker, sector_label)
 
 
 # ---- Peers ----
@@ -1336,38 +1683,78 @@ with tab_capital:
 
 
 # ---- Insiders (real Form-4 analysis when FMP key configured) ----
+# Heavy: SEC EDGAR Form 4 parsing can take 1-3 minutes. Gate behind an
+# explicit button (P10.7) so opening the Insiders tab doesn't block the
+# page on a request the user might not want. Once loaded, results stay
+# in session_state so subsequent visits are instant.
 with tab_insiders:
-    from analysis.insider_analysis import analyze_insider_activity
-    from analysis.etf_analysis import analyze_etf_holdings
-    from ui.components.insider_panel import render_insider_panel
-    from ui.components.etf_holdings_panel import render_etf_holdings_panel
-    from ui.components.sec_insiders_panel import render_sec_insiders_panel
-    from ui.components.senate_trading_panel import render_senate_trading_panel
-
     sub_corp, sub_gov = st.tabs([
         "Corporate insiders (Form 4)", "Government trades",
     ])
 
+    _ins_load_key = f"_ins_loaded_{active_ticker}"
+
     with sub_corp:
-        # ---- SEC EDGAR Form 4 (free, no key needed) ----
-        render_sec_insiders_panel(active_ticker)
+        if st.session_state.get(_ins_load_key):
+            from analysis.insider_analysis import analyze_insider_activity
+            from analysis.etf_analysis import analyze_etf_holdings
+            from ui.components.insider_panel import render_insider_panel
+            from ui.components.etf_holdings_panel import render_etf_holdings_panel
+            from ui.components.sec_insiders_panel import render_sec_insiders_panel
 
-        st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+            render_sec_insiders_panel(active_ticker)
 
-        # ---- FMP-aggregated Form 4 (when key is configured) ----
-        insider_res = analyze_insider_activity(active_ticker, months=24)
-        render_insider_panel(insider_res)
+            st.markdown("<div style='height:22px;'></div>",
+                        unsafe_allow_html=True)
+            insider_res = analyze_insider_activity(active_ticker, months=24)
+            render_insider_panel(insider_res)
 
-        st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
-        etf_res = analyze_etf_holdings(active_ticker)
-        render_etf_holdings_panel(etf_res)
+            st.markdown("<div style='height:22px;'></div>",
+                        unsafe_allow_html=True)
+            etf_res = analyze_etf_holdings(active_ticker)
+            render_etf_holdings_panel(etf_res)
+
+            if st.button("🔄 Refresh insider data",
+                         key=f"refresh_ins_{active_ticker}",
+                         type="secondary"):
+                st.session_state[_ins_load_key] = False
+                st.rerun()
+        else:
+            st.markdown(
+                '<div style="background:var(--surface); '
+                'border:1px dashed var(--border-hover); '
+                'border-radius:8px; padding:24px; text-align:center;">'
+                '<div style="color:var(--text-secondary); font-size:13px; '
+                'margin-bottom:12px;">'
+                '🐢 Insider data parses every Form 4 filing from SEC EDGAR.'
+                '<br>Estimated time: <b>1–3 minutes</b> '
+                '(cached for the rest of the session after first load).'
+                '</div></div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("Load insider history",
+                         key=f"load_ins_{active_ticker}", type="primary"):
+                st.session_state[_ins_load_key] = True
+                st.rerun()
 
     with sub_gov:
+        from ui.components.senate_trading_panel import render_senate_trading_panel
         render_senate_trading_panel(active_ticker)
 
 
 # ---- Charts ----
-with tab_charts:
+@st.fragment
+def _charts_tab_fragment(inc, bal, cf):
+    """Charts tab is the heaviest renderer — 6+ Plotly figures. Wrapped
+    in @st.fragment so it doesn't re-execute when sliders elsewhere move."""
+    from ui.charts.profitability_evolution import build_profitability_evolution
+    from ui.charts.debt_evolution import build_debt_evolution
+    from ui.charts.capital_allocation_stacked import build_capital_allocation_chart
+    from ui.charts.owner_earnings import build_owner_earnings_chart
+    from ui.charts.cash_conversion_cycle import (
+        build_ccc_chart, build_ccc_breakdown_table,
+    )
+
     st.markdown(
         '<div class="eq-section-label">REVENUE · NET INCOME · FREE CASH FLOW</div>',
         unsafe_allow_html=True,
@@ -1385,6 +1772,64 @@ with tab_charts:
         build_margins_figure(inc, bal, cf, height=320),
         use_container_width=True, config={"displayModeBar": False},
     )
+
+    st.markdown(
+        '<div class="eq-section-label" style="margin-top:18px;">'
+        'PROFITABILITY EVOLUTION · ROIC / ROCE / ROA</div>',
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(
+        build_profitability_evolution(inc, bal, cf, height=360),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+
+    st.markdown(
+        '<div class="eq-section-label" style="margin-top:18px;">'
+        'FINANCIAL DEBT EVOLUTION</div>',
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(
+        build_debt_evolution(inc, bal, cf, height=360),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+
+    st.markdown(
+        '<div class="eq-section-label" style="margin-top:18px;">'
+        'CAPITAL ALLOCATION</div>',
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(
+        build_capital_allocation_chart(inc, bal, cf, height=360),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+
+    st.markdown(
+        '<div class="eq-section-label" style="margin-top:18px;">'
+        'OWNER EARNINGS · BUFFETT-STYLE</div>',
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(
+        build_owner_earnings_chart(inc, bal, cf, height=360),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+
+    st.markdown(
+        '<div class="eq-section-label" style="margin-top:18px;">'
+        'CASH CONVERSION CYCLE · DSO / DIO / DPO</div>',
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(
+        build_ccc_chart(inc, bal, height=360),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+    _ccc_table = build_ccc_breakdown_table(inc, bal)
+    if not _ccc_table.empty:
+        with st.expander("CCC breakdown by year"):
+            st.dataframe(_ccc_table, use_container_width=True)
+
+
+with tab_charts:
+    _charts_tab_fragment(inc, bal, cf)
 
 
 # ============================================================

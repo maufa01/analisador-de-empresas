@@ -264,7 +264,10 @@ def render_financial_statements_panel(ticker: str) -> None:
         )
     with cols[2]:
         years = st.slider(
-            "Years to display", 5, 20, 10,
+            "Years to display",
+            min_value=3, max_value=10, value=5,
+            help="Default 5y. Bump higher only when you need deeper "
+                 "historical context.",
             key=f"sec_years_{ticker}",
         )
 

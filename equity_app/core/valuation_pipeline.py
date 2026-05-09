@@ -41,9 +41,26 @@ from valuation.residual_income import run_residual_income, RIResult
 from valuation.valuation_aggregator import aggregate, AggregatedValuation
 from scoring.scorer import compute_score, ScoreBreakdown
 from scoring.rating import rate, Rating
+from analysis.industry_classifier import classify_industry
 
 
-_NO_DCF_TICKERS: set[str] = {"JPM", "BAC", "WFC", "C", "GS", "MS"}
+def _should_skip_fcff_dcf(
+    ticker: str, sector: Optional[str], industry: Optional[str] = None,
+) -> tuple[bool, str]:
+    """FCFF DCF doesn't apply cleanly to financials or REITs.
+
+    Returns (skip, reason). Reason is a short human-readable string
+    surfaced in the Valuation tab so the user knows why DCF wasn't run
+    and what model fits instead.
+    """
+    cls = classify_industry(ticker, sector, industry)
+    if cls.is_bank:
+        return True, "Bank — use Residual Income or DDM, not FCFF DCF"
+    if cls.is_insurance:
+        return True, "Insurance — use Embedded Value or DDM"
+    if cls.is_reit:
+        return True, "REIT — use FFO / AFFO multiples or DDM"
+    return False, ""
 
 
 @dataclass
@@ -140,12 +157,13 @@ def run_valuation(
         ticker=ticker, sector=sector, current_price=current_price, wacc=wacc_res,
     )
 
-    g_override: Optional[float] = (
-        assumptions.override_growth or None
-    )
+    # override_growth is Optional[float]: None ⇒ historical CAGR, 0.0 ⇒
+    # explicit zero growth (e.g. user pinning a no-growth assumption).
+    g_override: Optional[float] = assumptions.override_growth
 
     # ---- DCF ----
-    if ticker not in _NO_DCF_TICKERS:
+    skip_dcf, skip_reason = _should_skip_fcff_dcf(ticker, sector)
+    if not skip_dcf:
         try:
             out.dcf = run_dcf(
                 income=income, balance=balance, cash=cash,
@@ -158,7 +176,7 @@ def run_valuation(
         except (ValuationError, InsufficientDataError) as exc:
             out.dcf_error = str(exc)
     else:
-        out.dcf_error = "DCF on FCFF does not apply to financials."
+        out.dcf_error = skip_reason
 
     # ---- Comparables ----
     if peers:

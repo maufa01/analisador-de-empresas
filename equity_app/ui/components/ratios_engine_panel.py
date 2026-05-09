@@ -546,9 +546,12 @@ def render_ratios_engine_panel(
     )
     ratios = engine.compute_all()
 
+    # 10y History sub-tab removed (P11.A3) — duplicates content shown
+    # in the Charts tab. The _render_history() helper is kept around in
+    # case the user wants to re-enable it later.
     tabs = st.tabs([
         "Profitability", "Liquidity", "Leverage", "Efficiency",
-        "Valuation", "Growth", "DuPont", "10y History",
+        "Valuation", "Growth", "DuPont",
     ])
     with tabs[0]: _render_profitability(engine, ratios, sector)
     with tabs[1]: _render_liquidity(engine, ratios, sector)
@@ -557,4 +560,61 @@ def render_ratios_engine_panel(
     with tabs[4]: _render_valuation(engine, ratios, sector)
     with tabs[5]: _render_growth(engine, ratios)
     with tabs[6]: _render_dupont(engine, ratios)
-    with tabs[7]: _render_history(engine)
+
+    # ---- Sector benchmark summary (cross-sectional view) ----
+    if sector:
+        try:
+            from analysis.benchmark_engine import batch_compare
+            from ui.components.benchmark_badge import (
+                render_benchmark_summary_table,
+            )
+
+            # Ratios are stored in decimal form internally (e.g. 0.255).
+            # The benchmark engine expects display units when the name
+            # carries "%", so convert before passing.
+            display_ratios: dict[str, float] = {}
+            pct_keys = {
+                "Gross Margin %":     "gross_margin",
+                "Operating Margin %": "operating_margin",
+                "Net Margin %":       "net_margin",
+                "FCF Margin %":       "fcf_margin",
+                "ROE %":              "roe",
+                "ROA %":               "roa",
+                "ROIC %":              "roic",
+                "ROCE %":              "roce",
+            }
+            for display_name, key in pct_keys.items():
+                v = ratios.get(key)
+                if v is not None:
+                    display_ratios[display_name] = float(v) * 100.0
+
+            scalar_keys = {
+                "Current Ratio":     "current_ratio",
+                "Quick Ratio":       "quick_ratio",
+                "Debt/Equity":       "debt_to_equity",
+                "Debt/Assets":       "debt_to_assets",
+                "Interest Coverage": "interest_coverage",
+                "Asset Turnover":    "asset_turnover",
+                "P/E":               "pe_ratio",
+                "P/S":               "ps_ratio",
+                "P/B":               "pb_ratio",
+                "EV/EBITDA":         "ev_to_ebitda",
+                "EV/Revenue":        "ev_to_revenue",
+            }
+            for display_name, key in scalar_keys.items():
+                v = ratios.get(key)
+                if v is not None:
+                    display_ratios[display_name] = float(v)
+
+            comparisons = batch_compare(display_ratios, sector)
+            if comparisons:
+                st.markdown("<div style='height:18px;'></div>",
+                            unsafe_allow_html=True)
+                render_benchmark_summary_table(
+                    comparisons,
+                    title=f"vs {sector} Sector Benchmarks (Damodaran)",
+                )
+        except Exception:
+            # Surface table is purely additive — never block the rest of
+            # the panel if anything goes sideways here.
+            pass

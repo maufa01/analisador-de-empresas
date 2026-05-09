@@ -42,6 +42,14 @@ ALIASES: dict[str, list[str]] = {
     "net_income": ["netIncome", "Net Income", "Net Income Common Stockholders"],
     "interest_expense": ["interestExpense", "Interest Expense"],
     "income_tax": ["incomeTaxExpense", "Tax Provision", "Income Tax Expense"],
+    "pretax_income": [
+        "incomeBeforeTax",
+        "Income Before Tax",
+        "incomeBeforeIncomeTaxes",
+        "pretax_income",
+        "Pretax Income",
+        "EBT",
+    ],
     "sga": [
         "sellingGeneralAndAdministrativeExpenses",
         "Selling General And Administrative",
@@ -272,9 +280,21 @@ def roic(
 
 
 def effective_tax_rate(income: pd.DataFrame, periods: int | None = 3) -> float:
-    """3-year average effective tax rate; falls back to 0.25 if unknown."""
+    """3-year average effective tax rate.
+
+    Uses ``Tax Expense / Pretax Income`` (income BEFORE tax). Falls back
+    to EBIT only when pretax is unavailable, with a logged warning —
+    EBIT understates the denominator for any company with debt, which
+    silently inflates ROIC via NOPAT.
+    """
     tax = _get(income, "income_tax")
-    pretax = _get(income, "ebit")
+    pretax = _get(income, "pretax_income")
+
+    used_fallback = False
+    if pretax is None:
+        pretax = _get(income, "ebit")
+        used_fallback = True
+
     if tax is None or pretax is None:
         return 0.25
     if periods:
@@ -284,10 +304,16 @@ def effective_tax_rate(income: pd.DataFrame, periods: int | None = 3) -> float:
     if not valid.any():
         return 0.25
     rate = float((tax[valid] / pretax[valid]).mean())
-    # Sanity clamp — anything outside [0, 0.5] is almost surely a data glitch.
     if not np.isfinite(rate) or rate < 0:
         return 0.25
-    return min(rate, 0.50)
+    rate = min(rate, 0.50)
+
+    if used_fallback:
+        import logging
+        logging.getLogger(__name__).warning(
+            "effective_tax_rate_ebit_fallback rate=%.4f", rate
+        )
+    return rate
 
 
 # ============================================================
@@ -457,3 +483,68 @@ def growth_summary(income: pd.DataFrame, cash: pd.DataFrame) -> dict[str, dict[s
             "cagr_10y": cagr(series, periods=10),
         }
     return out
+
+
+# ============================================================
+# Buffett-style Owner Earnings
+# ============================================================
+def owner_earnings(
+    income: pd.DataFrame,
+    balance: pd.DataFrame,
+    cash: pd.DataFrame,
+    periods: int = 5,
+) -> Optional[pd.Series]:
+    """
+    Buffett's Owner Earnings:
+
+        OE = Net Income + D&A − maintenance capex − ΔWC
+
+    Maintenance capex is approximated by the rolling N-year average of
+    D&A (Greenwald-style). Returns ``None`` if any required input is
+    missing — the chart caller can render a "no data" state.
+    """
+    ni = _get(income, "net_income")
+    da = _get(cash, "depreciation_cf")
+    if da is None:
+        da = _get(income, "depreciation_inc")
+    capex = _get(cash, "capex")
+    if ni is None or da is None or capex is None:
+        return None
+
+    maint_capex = da.rolling(periods, min_periods=2).mean().abs()
+
+    ca = _get(balance, "current_assets")
+    cl = _get(balance, "current_liabilities")
+    if ca is not None and cl is not None:
+        wc = ca - cl
+        delta_wc = wc.diff().fillna(0.0)
+    else:
+        delta_wc = pd.Series(0.0, index=ni.index)
+
+    return ni + da - maint_capex - delta_wc
+
+
+# ============================================================
+# Cached wrapper — keys on ticker, composes with load_bundle()
+#
+# The bare ``calculate_ratios()`` above takes raw DataFrames, which
+# Streamlit can't hash cheaply (the spec's ``df.shape`` hack would
+# collide any two same-shaped frames — silent correctness bug). The
+# wrapper below sits on top of ``load_bundle()`` so the cache key is
+# just the ticker string.
+# ============================================================
+def calculate_ratios_for(ticker: str, *, wacc: float | None = None) -> pd.DataFrame:
+    """``calculate_ratios`` keyed on ticker. Pulls financials from the
+    cached :func:`analysis.parallel_loader.load_bundle`, so subsequent
+    calls for the same ticker hit the bundle cache."""
+    import streamlit as st
+    from analysis.parallel_loader import load_bundle
+
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _impl(t: str, w: Optional[float]) -> pd.DataFrame:
+        b = load_bundle(t)
+        if b.income.empty:
+            return pd.DataFrame()
+        return calculate_ratios(b.income, b.balance, b.cash, wacc=w)
+
+    return _impl(ticker, wacc)

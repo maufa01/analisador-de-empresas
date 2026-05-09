@@ -27,13 +27,13 @@ def render_header_metric(
             cls = ""
         delta_html = f'<span class="eq-idx-change {cls}" style="margin-top:0;">{delta}</span>'
 
-    html = f"""
-    <div>
-        <div class="eq-header-label">{label}</div>
-        <div class="eq-header-metric">
-            <span class="eq-header-value">{value}</span>
-            {delta_html}
-        </div>
-    </div>
-    """
+    # Single-line HTML to avoid Streamlit's ≥4-space-indent code-block trap.
+    html = (
+        f'<div>'
+        f'<div class="eq-header-label">{label}</div>'
+        f'<div class="eq-header-metric">'
+        f'<span class="eq-header-value">{value}</span>'
+        f'{delta_html}</div>'
+        f'</div>'
+    )
     st.markdown(html, unsafe_allow_html=True)

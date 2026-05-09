@@ -94,11 +94,29 @@ def render_ratio_card(
     industry_avg: Optional[float] = None,
     kind: ValueKind = "pct",
     higher_better: bool = True,
+    sector: Optional[str] = None,
 ) -> None:
     """
     Render a single ratio card. ``history`` triggers a small sparkline
     via ``st.line_chart`` underneath the headline.
+
+    When ``sector`` is provided, the card asks the BenchmarkEngine for
+    a sector comparison and renders a stacked badge underneath the
+    headline (in addition to or in place of the explicit
+    ``industry_avg`` row).
     """
+    # Optional benchmark lookup — keeps the card useful even when the
+    # caller doesn't have ``industry_avg`` precomputed.
+    cmp = None
+    if sector is not None:
+        try:
+            from analysis.benchmark_engine import compare_to_sector
+            cmp = compare_to_sector(label, value, sector)
+            if cmp is not None and industry_avg is None:
+                industry_avg = cmp.benchmark_value
+        except Exception:
+            cmp = None
+
     color = _color_for_value(value, industry_avg, higher_better=higher_better)
     value_text = _fmt_value(value, kind)
     avg_text = _fmt_value(avg_10y, kind)
@@ -126,6 +144,15 @@ def render_ratio_card(
         '</div>',
     ]
     st.markdown("".join(parts), unsafe_allow_html=True)
+
+    # Optional stacked benchmark badge — only when sector + a valid
+    # comparison were resolved by the engine.
+    if cmp is not None and cmp.benchmark_value is not None:
+        try:
+            from ui.components.benchmark_badge import render_benchmark_badge
+            render_benchmark_badge(cmp, inline=False)
+        except Exception:
+            pass
 
     # Sparkline as a separate native st.line_chart — Streamlit hides the
     # axes when height is small. Skip when history is empty.

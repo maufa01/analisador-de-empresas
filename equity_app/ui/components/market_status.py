@@ -32,12 +32,13 @@ def render_status() -> None:
     label = "MARKET OPEN" if is_open else "MARKET CLOSED"
     dot_cls = "eq-status-open" if is_open else "eq-status-closed"
     clock = n.strftime("%H:%M")
-    html = f"""
-    <div class="eq-market-status" role="status" aria-live="polite">
-        <span class="eq-status-dot {dot_cls}" aria-hidden="true"></span>
-        <span>{label} · {clock} ET</span>
-    </div>
-    """
+    # Single-line HTML — indented f""" hits Streamlit's markdown trap.
+    html = (
+        f'<div class="eq-market-status" role="status" aria-live="polite">'
+        f'<span class="eq-status-dot {dot_cls}" aria-hidden="true"></span>'
+        f'<span>{label} · {clock} ET</span>'
+        f'</div>'
+    )
     st.markdown(html, unsafe_allow_html=True)
 
 

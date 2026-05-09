@@ -85,15 +85,18 @@ def render_valuation_card(
             f'margin-top:4px;">{sub_label}</div>'
         )
 
-    html = f"""
-    <div class="eq-card" style="border-left: 3px solid {border}; padding-left: 14px;">
-        <div class="eq-idx-label">{model}</div>
-        <div class="eq-header-metric" style="margin-top:2px;">
-            <span class="eq-idx-value">{_fmt_money(intrinsic)}</span>
-            {upside_html}
-        </div>
-        {range_html}
-        {sub_html}
-    </div>
-    """
+    # IMPORTANT: emit the HTML as ONE line with no leading whitespace.
+    # Streamlit's markdown parser runs first; any line indented ≥4 spaces
+    # becomes a fenced code block and the HTML leaks to the page as
+    # literal text — which is the bug the user saw in Image 3.
+    html = (
+        f'<div class="eq-card" style="border-left:3px solid {border}; '
+        f'padding-left:14px;">'
+        f'<div class="eq-idx-label">{model}</div>'
+        f'<div class="eq-header-metric" style="margin-top:2px;">'
+        f'<span class="eq-idx-value">{_fmt_money(intrinsic)}</span>'
+        f'{upside_html}</div>'
+        f'{range_html}{sub_html}'
+        f'</div>'
+    )
     st.markdown(html, unsafe_allow_html=True)

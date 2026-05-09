@@ -4,10 +4,15 @@ Pretty labels for FMP / yfinance camelCase financial statement fields.
 Plus per-statement "row order + subtotal markers" used by the financial
 table renderer to draw hierarchy (Revenue → Gross Profit → Operating
 Income → Net Income, etc.).
+
+The HYBRID view (analyst-spreadsheet style) uses richer layouts with
+``DerivedRow`` markers — rows computed inline from already-loaded
+absolute rows (% YoY change, % margins, % of total).
 """
 from __future__ import annotations
 import re
-from typing import Optional
+from dataclasses import dataclass
+from typing import Literal, Optional, Union
 
 
 # ============================================================
@@ -170,8 +175,135 @@ SECTION_LABELS: dict[str, str] = {
 }
 
 
+# ============================================================
+# HYBRID VIEW — derived rows + analyst-spreadsheet layouts
+# ============================================================
+DerivedStyle = Literal[
+    "yoy",                    # % change vs previous period
+    "margin_of_revenue",      # value / revenue
+    "of_total_assets",        # value / total assets
+    "of_total_liabilities",   # value / total liabilities
+    "tax_rate",               # value / ref_row (typically pretax)
+    "capex_margin",           # capex / revenue (negative natural)
+]
+
+
+@dataclass(frozen=True)
+class DerivedRow:
+    """A row computed inline from already-loaded absolute rows."""
+    label: str
+    style: DerivedStyle
+    base_row: str                       # account key the value depends on
+    ref_row: Optional[str] = None       # divisor for tax_rate
+    indent: int = 1
+    color_by_sign: bool = False         # gold/orange instead of muted grey
+
+
+# ----- Layout = list[(key | DerivedRow, role)] -----
+# role ∈ {None, "subtotal", "section_header"}
+# Section headers use the legacy "__assets__" sentinel keys.
+LayoutEntry = tuple[Union[str, DerivedRow], Optional[str]]
+
+
+INCOME_STATEMENT_LAYOUT: list[LayoutEntry] = [
+    ("revenue", None),
+    (DerivedRow("% change YoY", "yoy", "revenue", color_by_sign=True), None),
+    ("costOfRevenue", None),
+    ("grossProfit", "subtotal"),
+    (DerivedRow("% change YoY", "yoy", "grossProfit", color_by_sign=True), None),
+    (DerivedRow("% gross margin", "margin_of_revenue", "grossProfit"), None),
+    ("researchAndDevelopmentExpenses", None),
+    ("sellingGeneralAndAdministrativeExpenses", None),
+    ("operatingExpenses", None),
+    ("operatingIncome", "subtotal"),
+    (DerivedRow("% change YoY", "yoy", "operatingIncome", color_by_sign=True), None),
+    (DerivedRow("% operating margin", "margin_of_revenue", "operatingIncome"), None),
+    ("interestIncome", None),
+    ("interestExpense", None),
+    ("depreciationAndAmortization", None),
+    ("incomeBeforeTax", "subtotal"),
+    ("incomeTaxExpense", None),
+    (DerivedRow("% effective tax rate", "tax_rate",
+                "incomeTaxExpense", "incomeBeforeTax"), None),
+    ("netIncome", "subtotal"),
+    (DerivedRow("% change YoY", "yoy", "netIncome", color_by_sign=True), None),
+    (DerivedRow("% net margin", "margin_of_revenue", "netIncome"), None),
+    ("ebitda", None),
+    (DerivedRow("% change YoY", "yoy", "ebitda", color_by_sign=True), None),
+    (DerivedRow("% EBITDA margin", "margin_of_revenue", "ebitda"), None),
+    ("weightedAverageShsOut", None),
+    (DerivedRow("% change YoY", "yoy", "weightedAverageShsOut",
+                color_by_sign=True), None),
+    ("epsdiluted", None),
+]
+
+
+BALANCE_SHEET_LAYOUT: list[LayoutEntry] = [
+    ("__assets__", "section_header"),
+    ("cashAndCashEquivalents", None),
+    ("netReceivables", None),
+    ("inventory", None),
+    ("totalCurrentAssets", "subtotal"),
+    (DerivedRow("% of total assets", "of_total_assets", "totalCurrentAssets"), None),
+    ("propertyPlantEquipmentNet", None),
+    ("goodwill", None),
+    ("intangibleAssets", None),
+    ("totalNonCurrentAssets", "subtotal"),
+    (DerivedRow("% of total assets", "of_total_assets",
+                "totalNonCurrentAssets"), None),
+    ("totalAssets", "subtotal"),
+    (DerivedRow("% change YoY", "yoy", "totalAssets", color_by_sign=True), None),
+
+    ("__liabilities__", "section_header"),
+    ("accountPayables", None),
+    ("shortTermDebt", None),
+    ("totalCurrentLiabilities", "subtotal"),
+    (DerivedRow("% of total liabilities", "of_total_liabilities",
+                "totalCurrentLiabilities"), None),
+    ("longTermDebt", None),
+    ("totalNonCurrentLiabilities", "subtotal"),
+    (DerivedRow("% of total liabilities", "of_total_liabilities",
+                "totalNonCurrentLiabilities"), None),
+    ("totalLiabilities", "subtotal"),
+    (DerivedRow("% change YoY", "yoy", "totalLiabilities", color_by_sign=True), None),
+
+    ("__equity__", "section_header"),
+    ("totalStockholdersEquity", "subtotal"),
+    (DerivedRow("% change YoY", "yoy", "totalStockholdersEquity",
+                color_by_sign=True), None),
+]
+
+
+CASH_FLOW_LAYOUT: list[LayoutEntry] = [
+    ("operatingCashFlow", "subtotal"),
+    (DerivedRow("% change YoY", "yoy", "operatingCashFlow",
+                color_by_sign=True), None),
+    (DerivedRow("% CFO margin", "margin_of_revenue", "operatingCashFlow"), None),
+    ("capitalExpenditure", None),
+    (DerivedRow("% capex margin", "capex_margin", "capitalExpenditure"), None),
+    ("freeCashFlow", "subtotal"),
+    (DerivedRow("% change YoY", "yoy", "freeCashFlow", color_by_sign=True), None),
+    (DerivedRow("% FCF margin", "margin_of_revenue", "freeCashFlow"), None),
+    ("stockBasedCompensation", None),
+    ("dividendsPaid", None),
+    ("commonStockRepurchased", None),
+    ("acquisitionsNet", None),
+]
+
+
+# Account keys that get a CAGR column rendered (5Y / 10Y).
+CAGR_ELIGIBLE_ROWS: set[str] = {
+    "revenue", "grossProfit", "operatingIncome", "netIncome",
+    "ebitda", "epsdiluted", "operatingCashFlow", "freeCashFlow",
+    "totalAssets", "totalStockholdersEquity",
+}
+
+
 __all__ = [
     "ACCOUNT_LABELS", "get_label",
     "INCOME_STATEMENT_ORDER", "BALANCE_SHEET_ORDER", "CASH_FLOW_ORDER",
+    "INCOME_STATEMENT_LAYOUT", "BALANCE_SHEET_LAYOUT", "CASH_FLOW_LAYOUT",
+    "CAGR_ELIGIBLE_ROWS",
     "SECTION_LABELS",
+    "DerivedRow", "DerivedStyle",
 ]

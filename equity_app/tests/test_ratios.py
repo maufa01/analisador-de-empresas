@@ -300,3 +300,39 @@ def test_growth_summary_returns_dict():
     summary = growth_summary(inc, cf)
     assert "revenue" in summary
     assert "cagr_3y" in summary["revenue"]
+
+
+# ============================================================
+# Bug regressions
+# ============================================================
+def test_effective_tax_rate_uses_pretax_not_ebit():
+    """Bug regression: must use incomeBeforeTax, not EBIT.
+
+    For a company with $30M of interest expense, EBIT = $130, pretax = $100.
+    Tax of $21 against the right denominator gives ~21% (true rate).
+    Against the wrong denominator (EBIT) it gives ~16% — too low, which
+    inflates NOPAT and ROIC silently.
+    """
+    income = pd.DataFrame({
+        "ebit":             [130, 140, 150],
+        "incomeBeforeTax":  [100, 110, 120],   # interest expense = 30
+        "incomeTaxExpense": [21,  23,  25],
+    }, index=pd.date_range("2022", periods=3, freq="YE"))
+
+    rate = effective_tax_rate(income, periods=3)
+    assert 0.19 < rate < 0.23, f"Got {rate}, expected ~0.21"
+
+
+def test_effective_tax_rate_falls_back_to_ebit_when_pretax_missing(caplog):
+    """When pretax_income isn't available, fall back to EBIT but log."""
+    import logging
+    income = pd.DataFrame({
+        "ebit":             [100, 110, 120],
+        "incomeTaxExpense": [21,  23,  25],
+    }, index=pd.date_range("2022", periods=3, freq="YE"))
+
+    with caplog.at_level(logging.WARNING):
+        rate = effective_tax_rate(income, periods=3)
+
+    assert 0.18 < rate < 0.22
+    assert any("ebit_fallback" in rec.message for rec in caplog.records)
