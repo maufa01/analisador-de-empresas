@@ -114,13 +114,14 @@ def _hydrate_one(t: str) -> PeerSnapshot:
             except (TypeError, ValueError):
                 return None
 
-        rps = _f("revenuePerShare")
-        shares = _f("weightedAverageShsOut") or _f("sharesOutstanding")
-        if rps and shares:
-            revenue = rps * shares
-
-        ebitda = _f("ebitda")
         ev = _f("enterpriseValue")
+        ev_to_sales = _f("evToSales")
+        ev_to_ebitda = _f("evToEBITDA")
+
+        if ev and ev_to_sales:
+            revenue = ev / ev_to_sales
+        if ev and ev_to_ebitda:
+            ebitda = ev / ev_to_ebitda
 
     return PeerSnapshot(
         ticker=t,
