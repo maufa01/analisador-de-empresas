@@ -101,17 +101,27 @@ def heal_income_statement(income: pd.DataFrame) -> pd.DataFrame:
     df = income.copy()
 
     # ---- Revenue ----
-    if "revenue" not in df.columns and "totalRevenue" not in df.columns:
-        # 1) try the SEC EDGAR XBRL aliases first (real reported field
-        #    under a different element name)
+    # Heal when the column is absent OR present-but-partially-NaN (e.g. SEC
+    # EDGAR ships pre-2018 years under "Revenues" but post-ASC 606 years
+    # under "RevenueFromContractWithCustomerExcludingAssessedTax").
+    needs_heal = (
+        "revenue" not in df.columns
+        or df["revenue"].isna().any()
+    )
+    if needs_heal:
+        if "revenue" not in df.columns:
+            df["revenue"] = float("nan")
+
+        # 1) fillna from any SEC EDGAR XBRL alias present
         for alias in _REVENUE_XBRL_ALIASES:
             if alias in df.columns:
-                df["revenue"] = df[alias]
-                break
-        # 2) last resort: gross profit + cost of revenue
-        if "revenue" not in df.columns:
+                df["revenue"] = df["revenue"].fillna(df[alias])
+
+        # 2) last resort: revenue = grossProfit + costOfRevenue
+        if df["revenue"].isna().any():
             if "grossProfit" in df.columns and "costOfRevenue" in df.columns:
-                df["revenue"] = df["grossProfit"] + df["costOfRevenue"]
+                derived = df["grossProfit"] + df["costOfRevenue"]
+                df["revenue"] = df["revenue"].fillna(derived)
 
     # ---- Operating income (path 1: gross profit − opex) ----
     if (_get(df, "operating_income") is None

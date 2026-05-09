@@ -57,29 +57,33 @@ def compute_ttm_income(quarterly: Optional[pd.DataFrame]) -> Optional[pd.Series]
     """Sum of last 4 quarters for flow items, last value for stock items.
 
     Unrecognised columns default to FLOW (sum) — most income-statement
-    columns are flows.
+    columns are flows. Identifier metadata columns (symbol, cik,
+    filingDate, period, …) are non-numeric and excluded up-front.
     """
     last4 = _last_n(quarterly, 4)
     if last4 is None:
         return None
+    last4_num = last4.select_dtypes(include="number")
     out = pd.Series(dtype=float)
-    for col in last4.columns:
+    for col in last4_num.columns:
         if col in STOCK_ITEMS_INCOME:
-            out[col] = float(last4[col].dropna().iloc[-1]) if last4[col].notna().any() else float("nan")
+            out[col] = float(last4_num[col].dropna().iloc[-1]) if last4_num[col].notna().any() else float("nan")
         else:
-            out[col] = float(last4[col].sum(skipna=True))
+            out[col] = float(last4_num[col].sum(skipna=True))
     out.name = "TTM"
     return out
 
 
 def compute_ttm_cash(quarterly: Optional[pd.DataFrame]) -> Optional[pd.Series]:
-    """Sum last 4 quarters — every cash-flow item is a flow."""
+    """Sum last 4 quarters — every cash-flow item is a flow. Identifier
+    metadata columns are non-numeric and excluded up-front."""
     last4 = _last_n(quarterly, 4)
     if last4 is None:
         return None
+    last4_num = last4.select_dtypes(include="number")
     out = pd.Series(dtype=float)
-    for col in last4.columns:
-        out[col] = float(last4[col].sum(skipna=True))
+    for col in last4_num.columns:
+        out[col] = float(last4_num[col].sum(skipna=True))
     out.name = "TTM"
     return out
 
