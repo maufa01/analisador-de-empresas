@@ -149,32 +149,93 @@ if _PYDANTIC_AVAILABLE:
     settings = Settings()
 
 else:
-    # Minimal stand-in so that pure-syntax tests can import this module
-    # without pydantic installed. Will never run in production.
+    # Stand-in for environments without pydantic-settings (e.g. Streamlit
+    # Cloud when the dep isn't pinned). Reads os.environ lazily on every
+    # attribute access so secrets hydrated by
+    # `_hydrate_env_from_streamlit_secrets` are picked up at use time, not
+    # frozen at import time.
     class _Stub:
-        fmp_api_key = ""
-        fred_api_key = ""
-        alpha_vantage_key = ""
-        marketaux_api_key = ""
-        finnhub_api_key = ""
-        anthropic_api_key = ""
-        sec_user_agent = "Equity App noreply@example.com"
-        cache_backend = "disk"
-        redis_url = "redis://localhost:6379"
-        cache_ttl_hours = 24
-        cache_dir = CACHE_DIR_DEFAULT
-        watchlist_db_path = WATCHLIST_DB_DEFAULT
-        log_level = "INFO"
-        log_format = "json"
-        fmp_calls_per_minute = 250
-        finviz_delay_seconds = 1.0
-        fred_calls_per_minute = 120
-        yfinance_delay_seconds = 0.5
-        default_refresh_interval = 5
-        default_risk_free = 0.045
-        default_erp = 0.055
-        default_terminal_growth = 0.025
-        provider_priority = "fmp,finviz,yfinance"
-        provider_priority_list = ["fmp", "finviz", "yfinance"]
+        # Coerce-helpers ------------------------------------------------
+        @staticmethod
+        def _str(name: str, default: str = "") -> str:
+            return _os.environ.get(name, default) or default
+
+        @staticmethod
+        def _int(name: str, default: int) -> int:
+            try:
+                return int(_os.environ.get(name) or default)
+            except (TypeError, ValueError):
+                return default
+
+        @staticmethod
+        def _float(name: str, default: float) -> float:
+            try:
+                return float(_os.environ.get(name) or default)
+            except (TypeError, ValueError):
+                return default
+
+        # ---- API keys ----
+        @property
+        def fmp_api_key(self) -> str:        return self._str("FMP_API_KEY")
+        @property
+        def fred_api_key(self) -> str:       return self._str("FRED_API_KEY")
+        @property
+        def alpha_vantage_key(self) -> str:  return self._str("ALPHA_VANTAGE_KEY")
+        @property
+        def marketaux_api_key(self) -> str:  return self._str("MARKETAUX_API_KEY")
+        @property
+        def finnhub_api_key(self) -> str:    return self._str("FINNHUB_API_KEY")
+        @property
+        def anthropic_api_key(self) -> str:  return self._str("ANTHROPIC_API_KEY")
+        @property
+        def sec_user_agent(self) -> str:
+            return self._str("SEC_USER_AGENT", "Equity App noreply@example.com")
+
+        # ---- Cache / persistence ----
+        @property
+        def cache_backend(self) -> str:        return self._str("CACHE_BACKEND", "disk")
+        @property
+        def redis_url(self) -> str:            return self._str("REDIS_URL", "redis://localhost:6379")
+        @property
+        def cache_ttl_hours(self) -> int:      return self._int("CACHE_TTL_HOURS", 24)
+        @property
+        def cache_dir(self) -> str:            return self._str("CACHE_DIR", CACHE_DIR_DEFAULT)
+        @property
+        def watchlist_db_path(self) -> str:    return self._str("WATCHLIST_DB_PATH", WATCHLIST_DB_DEFAULT)
+
+        # ---- Logging ----
+        @property
+        def log_level(self) -> str:    return self._str("LOG_LEVEL", "INFO")
+        @property
+        def log_format(self) -> str:   return self._str("LOG_FORMAT", "json")
+
+        # ---- Rate limits ----
+        @property
+        def fmp_calls_per_minute(self) -> int:    return self._int("FMP_CALLS_PER_MINUTE", 250)
+        @property
+        def finviz_delay_seconds(self) -> float:  return self._float("FINVIZ_DELAY_SECONDS", 1.0)
+        @property
+        def fred_calls_per_minute(self) -> int:   return self._int("FRED_CALLS_PER_MINUTE", 120)
+        @property
+        def yfinance_delay_seconds(self) -> float:return self._float("YFINANCE_DELAY_SECONDS", 0.5)
+
+        # ---- Defaults ----
+        @property
+        def default_refresh_interval(self) -> int:  return self._int("DEFAULT_REFRESH_INTERVAL", 5)
+        @property
+        def default_risk_free(self) -> float:       return self._float("DEFAULT_RISK_FREE", 0.045)
+        @property
+        def default_erp(self) -> float:             return self._float("DEFAULT_ERP", 0.055)
+        @property
+        def default_terminal_growth(self) -> float: return self._float("DEFAULT_TERMINAL_GROWTH", 0.025)
+
+        # ---- Provider priority ----
+        @property
+        def provider_priority(self) -> str:
+            return self._str("PROVIDER_PRIORITY", "fmp,finviz,yfinance")
+
+        @property
+        def provider_priority_list(self) -> list[str]:
+            return [p.strip().lower() for p in self.provider_priority.split(",") if p.strip()]
 
     settings = _Stub()  # type: ignore

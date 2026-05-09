@@ -67,7 +67,10 @@ from core.logging import get_logger
 
 log = get_logger(__name__)
 
-FMP_BASE = "https://financialmodelingprep.com/api/v3"
+# Stable API (post Aug-2025 keys must use this; legacy /api/v3 returns 403
+# with "Legacy Endpoint" message for keys created after the cutover).
+# Stable endpoints accept the ticker as ?symbol=X instead of in the path.
+FMP_BASE = "https://financialmodelingprep.com/stable"
 _fmp_limiter = make_limiter(settings.fmp_calls_per_minute, 60)
 
 
@@ -90,7 +93,7 @@ class FMPProvider(DataProvider):
     @cached("quote", ttl=CACHE_TTL["quote"])
     def fetch_quote(self, ticker: str) -> Quote:
         ticker = ticker.upper().strip()
-        data = self._get(f"quote/{ticker}")
+        data = self._get("quote", symbol=ticker)
         if not data:
             raise TickerNotFoundError(ticker=ticker)
         q = data[0] if isinstance(data, list) else data
@@ -149,7 +152,7 @@ class FMPProvider(DataProvider):
 
     @cached("fundamentals", ttl=CACHE_TTL["fundamentals"])
     def fetch_profile(self, ticker: str) -> dict:
-        data = self._get(f"profile/{ticker.upper().strip()}")
+        data = self._get("profile", symbol=ticker.upper().strip())
         if not data:
             raise TickerNotFoundError(ticker=ticker)
         return data[0] if isinstance(data, list) else data
@@ -157,7 +160,8 @@ class FMPProvider(DataProvider):
     @cached("financials", ttl=CACHE_TTL["financials"])
     def fetch_income_statement(self, ticker: str, years: int = 10) -> pd.DataFrame:
         data = self._get(
-            f"income-statement/{ticker.upper().strip()}",
+            "income-statement",
+            symbol=ticker.upper().strip(),
             limit=years,
             period="annual",
         )
@@ -166,7 +170,8 @@ class FMPProvider(DataProvider):
     @cached("financials", ttl=CACHE_TTL["financials"])
     def fetch_balance_sheet(self, ticker: str, years: int = 10) -> pd.DataFrame:
         data = self._get(
-            f"balance-sheet-statement/{ticker.upper().strip()}",
+            "balance-sheet-statement",
+            symbol=ticker.upper().strip(),
             limit=years,
             period="annual",
         )
@@ -175,7 +180,8 @@ class FMPProvider(DataProvider):
     @cached("financials", ttl=CACHE_TTL["financials"])
     def fetch_cash_flow(self, ticker: str, years: int = 10) -> pd.DataFrame:
         data = self._get(
-            f"cash-flow-statement/{ticker.upper().strip()}",
+            "cash-flow-statement",
+            symbol=ticker.upper().strip(),
             limit=years,
             period="annual",
         )
@@ -188,7 +194,8 @@ class FMPProvider(DataProvider):
     ) -> pd.DataFrame:
         try:
             data = self._get(
-                f"income-statement/{ticker.upper().strip()}",
+                "income-statement",
+                symbol=ticker.upper().strip(),
                 limit=quarters, period="quarter",
             )
             return _to_dataframe(data)
@@ -201,7 +208,8 @@ class FMPProvider(DataProvider):
     ) -> pd.DataFrame:
         try:
             data = self._get(
-                f"balance-sheet-statement/{ticker.upper().strip()}",
+                "balance-sheet-statement",
+                symbol=ticker.upper().strip(),
                 limit=quarters, period="quarter",
             )
             return _to_dataframe(data)
@@ -214,7 +222,8 @@ class FMPProvider(DataProvider):
     ) -> pd.DataFrame:
         try:
             data = self._get(
-                f"cash-flow-statement/{ticker.upper().strip()}",
+                "cash-flow-statement",
+                symbol=ticker.upper().strip(),
                 limit=quarters, period="quarter",
             )
             return _to_dataframe(data)
@@ -225,7 +234,8 @@ class FMPProvider(DataProvider):
     def fetch_key_metrics(self, ticker: str, years: int = 10) -> pd.DataFrame:
         try:
             data = self._get(
-                f"key-metrics/{ticker.upper().strip()}",
+                "key-metrics",
+                symbol=ticker.upper().strip(),
                 limit=years, period="annual",
             )
             return _to_dataframe(data)
@@ -236,7 +246,8 @@ class FMPProvider(DataProvider):
     def fetch_ratios(self, ticker: str, years: int = 10) -> pd.DataFrame:
         try:
             data = self._get(
-                f"ratios/{ticker.upper().strip()}",
+                "ratios",
+                symbol=ticker.upper().strip(),
                 limit=years, period="annual",
             )
             return _to_dataframe(data)
@@ -246,16 +257,25 @@ class FMPProvider(DataProvider):
     @cached("fundamentals", ttl=CACHE_TTL["fundamentals"])
     def fetch_peers(self, ticker: str) -> list[str]:
         try:
-            data = self._get("stock_peers", symbol=ticker.upper().strip())
+            data = self._get("stock-peers", symbol=ticker.upper().strip())
         except TickerNotFoundError:
             return []
         if not data:
             return []
-        first = data[0] if isinstance(data, list) else data
-        if not isinstance(first, dict):
-            return []
-        peers = first.get("peersList") or []
-        return [str(p).upper() for p in peers]
+        # Stable shape: flat array of {symbol, companyName, price, ...}.
+        # Legacy v3 shape (kept as fallback): {peersList: [...]}.
+        if isinstance(data, list):
+            out = []
+            for entry in data:
+                if isinstance(entry, dict) and entry.get("symbol"):
+                    out.append(str(entry["symbol"]).upper())
+                elif isinstance(entry, str):
+                    out.append(entry.upper())
+            return out
+        if isinstance(data, dict):
+            peers = data.get("peersList") or []
+            return [str(p).upper() for p in peers]
+        return []
 
     @cached("prices_eod", ttl=CACHE_TTL["prices_eod"])
     def fetch_prices(self, ticker: str, years: int = 5) -> pd.DataFrame:
@@ -263,15 +283,20 @@ class FMPProvider(DataProvider):
         start = end - timedelta(days=years * 366)
         try:
             data = self._get(
-                f"historical-price-full/{ticker.upper().strip()}",
+                "historical-price-eod/full",
+                symbol=ticker.upper().strip(),
                 **{"from": start.isoformat(), "to": end.isoformat()},
             )
         except TickerNotFoundError:
             return pd.DataFrame()
 
-        if not data or not isinstance(data, dict) or "historical" not in data:
+        # Stable returns a flat list; legacy v3 wrapped it in {"historical": [...]}.
+        if isinstance(data, dict):
+            hist = data.get("historical") or []
+        elif isinstance(data, list):
+            hist = data
+        else:
             return pd.DataFrame()
-        hist = data.get("historical") or []
         if not hist:
             return pd.DataFrame()
         df = pd.DataFrame(hist)

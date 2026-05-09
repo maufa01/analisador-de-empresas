@@ -1,0 +1,35 @@
+# Defense-in-depth — equity_app/.gitignore is the canonical one, this
+# root copy guards against keys accidentally placed at repo root.
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Cache + persistence
+.cache/
+.data/
+*.db
+
+# Secrets — never commit any of these
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+secrets.toml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
