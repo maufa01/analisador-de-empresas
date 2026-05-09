@@ -12,7 +12,10 @@ from pathlib import Path
 
 # ``equity_app`` is added to sys.path so its modules (ui, data, analysis,
 # valuation, portfolio, scoring) resolve as top-level imports — same way
-# they do when running ``streamlit run equity_app/app.py`` directly.
+# they do when running ``streamlit run equity_app/app.py`` 
+# 
+# 
+# directly.
 ROOT = Path(__file__).resolve().parent / "equity_app"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -56,3 +59,5 @@ try:
 except TypeError:
     nav = st.navigation(pages)
 nav.run()
+
+

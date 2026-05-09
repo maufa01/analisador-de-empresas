@@ -100,6 +100,7 @@ def _hydrate_one(t: str) -> PeerSnapshot:
 
     mcap = profile.get("mktCap") or profile.get("marketCap")
     revenue = ebitda = ev = None
+    net_income = book_value = revenue_yoy = None
 
     if km is not None and not km.empty:
         last = km.iloc[-1]

@@ -270,11 +270,14 @@ def render_competitive_landscape(
 
     df = pd.DataFrame(rows).set_index("Ticker")
 
-    # Industry-average row (mean across peers, excluding target)
+    # Industry-average row (mean across peers, excluding target).
+    # Skip entirely when no peers survived hydration — otherwise the row
+    # is just "None None None …" which reads like a UI bug.
     peer_only = df.drop(target_ticker, errors="ignore")
-    industry_avg = peer_only.mean(numeric_only=True)
-    industry_avg.name = "Industry avg"
-    df = pd.concat([df, industry_avg.to_frame().T])
+    if not peer_only.empty:
+        industry_avg = peer_only.mean(numeric_only=True)
+        industry_avg.name = "Industry avg"
+        df = pd.concat([df, industry_avg.to_frame().T])
 
     # Style: highlight best per column (excluding the avg row)
     def _color_col(col: pd.Series) -> list[str]:

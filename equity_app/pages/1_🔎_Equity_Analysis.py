@@ -42,6 +42,27 @@ from data.user_assumptions_db import (
     IS_PERSISTENT,
 )
 from valuation.comparables import PeerSnapshot, comparables_table
+
+
+# Centralised cap so income / balance / cashflow / ratios all show the
+# same window. SEC EDGAR ships 30+ years of history with multiple filings
+# per fiscal year (10-K + 10-K/A); without dedup the table renders with
+# 4 columns labelled "FY 2008".
+_FINANCIALS_YEARS = 5
+
+def _dedup_and_cap_years(df: pd.DataFrame, years: int = _FINANCIALS_YEARS) -> pd.DataFrame:
+    """Sort ascending, keep latest filing per fiscal year, return last N years."""
+    if df is None or df.empty or years <= 0:
+        return df
+    idx = pd.to_datetime(df.index, errors="coerce")
+    if idx.isna().all():
+        return df.tail(years)
+    df = df.copy()
+    df.index = idx
+    df = df.sort_index()
+    keep_mask = ~pd.Series(df.index.year, index=df.index).duplicated(keep="last").values
+    df = df.iloc[keep_mask]
+    return df.tail(years)
 from valuation.dcf_three_stage import sensitivity_table
 from ui.charts.margins_evolution import build_margins_figure
 from ui.charts.revenue_history import build_revenue_figure
@@ -1412,11 +1433,15 @@ with tab_financials:
         'INCOME STATEMENT</div>',
         unsafe_allow_html=True,
     )
+    inc5  = _dedup_and_cap_years(inc)
+    bal5  = _dedup_and_cap_years(bal)
+    cf5   = _dedup_and_cap_years(cf)
+
     st.plotly_chart(
-        build_income_chart(inc, height=200),
+        build_income_chart(inc5, height=200),
         use_container_width=True, config={"displayModeBar": False},
     )
-    render_income_statement(inc, view=view_mode, quarterly=inc_q)
+    render_income_statement(inc5, view=view_mode, quarterly=inc_q)
 
     # ---- Balance Sheet ----
     st.markdown(
@@ -1425,10 +1450,10 @@ with tab_financials:
         unsafe_allow_html=True,
     )
     st.plotly_chart(
-        build_balance_chart(bal, height=200),
+        build_balance_chart(bal5, height=200),
         use_container_width=True, config={"displayModeBar": False},
     )
-    render_balance_sheet(bal, view=view_mode, quarterly=bal_q)
+    render_balance_sheet(bal5, view=view_mode, quarterly=bal_q)
 
     # ---- Cash Flow ----
     st.markdown(
@@ -1437,10 +1462,10 @@ with tab_financials:
         unsafe_allow_html=True,
     )
     st.plotly_chart(
-        build_fcf_chart(cf, income=inc, height=200),
+        build_fcf_chart(cf5, income=inc5, height=200),
         use_container_width=True, config={"displayModeBar": False},
     )
-    render_cash_flow(cf, view=view_mode, quarterly=cf_q)
+    render_cash_flow(cf5, view=view_mode, quarterly=cf_q)
 
     # ---- Financial Ratios (kept as st.dataframe — already legible) ----
     st.markdown(
@@ -1455,11 +1480,10 @@ with tab_financials:
         "FCF Margin %", "FCF Adj Margin %", "Cash Conversion",
     ) if c in ratios.columns]
 
-    # Drop duplicate period_end rows (SEC sometimes ships restatements /
-    # 10-K/A amendments under the same fiscal-year-end). Keep the most
-    # recent one — ratios is sorted ascending by date, so 'last' wins.
-    ratios_dedup = ratios[~ratios.index.duplicated(keep="last")]
-    transposed = ratios_dedup[show_cols].T
+    # Drop duplicate filings + cap to the same 5-year window the
+    # statements above use, so the panels stay aligned.
+    ratios_capped = _dedup_and_cap_years(ratios)
+    transposed = ratios_capped[show_cols].T
 
     # Year-only labels collide when two filings sit in the same year
     # (e.g. fiscal-year-end shifts). Disambiguate with a numeric suffix

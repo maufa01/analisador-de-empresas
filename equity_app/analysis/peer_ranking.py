@@ -41,6 +41,7 @@ class MetricRanking:
     n_peers:       int
     band:          str                             # e.g. "top decile"
     flag:          str                             # "✓" / "⚠" / "✗"
+    target_only_reason: str = ""                   # shown by the table for target-only rows
 
 
 @dataclass
@@ -101,15 +102,20 @@ def _roe(p: PeerSnapshot) -> Optional[float]:
 
 
 # ---- Target-only metrics (need full DataFrames) ----
-def _revenue_growth_5y(income: pd.DataFrame) -> Optional[float]:
+def _revenue_growth_1y(income: pd.DataFrame) -> Optional[float]:
+    """1y revenue growth in %. Same shape as PeerSnapshot.revenue_yoy so
+    targets and peers can be compared apples-to-apples."""
     rev = _get(income, "revenue")
-    if rev is None or len(rev.dropna()) < 2:
+    if rev is None:
         return None
     s = rev.dropna()
-    if s.iloc[0] <= 0:
+    if len(s) < 2 or s.iloc[-2] <= 0:
         return None
-    g = cagr(s, periods=min(5, len(s) - 1))
-    return float(g) * 100.0 if math.isfinite(g) else None
+    return (float(s.iloc[-1]) / float(s.iloc[-2]) - 1.0) * 100.0
+
+
+def _revenue_yoy_peer(p: PeerSnapshot) -> Optional[float]:
+    return _safe(p.revenue_yoy)
 
 
 def _fcf_growth_5y(cash: pd.DataFrame) -> Optional[float]:
@@ -205,12 +211,14 @@ def _band_and_flag(percentile: Optional[float], *, higher_better: bool) -> tuple
 # ============================================================
 _METRIC_DEFS: list[dict] = [
     # ---- Growth ----
-    {"metric": "revenue_growth_5y", "label": "Revenue growth 5y",
-     "category": "Growth", "higher_better": True, "target_only": True},
+    {"metric": "revenue_growth_1y", "label": "Revenue growth 1y",
+     "category": "Growth", "higher_better": True},
     {"metric": "fcf_growth_5y", "label": "FCF growth 5y",
-     "category": "Growth", "higher_better": True, "target_only": True},
+     "category": "Growth", "higher_better": True, "target_only": True,
+     "target_only_reason": "Requires multi-year FCF per peer (not in snapshot)"},
     {"metric": "eps_growth_5y", "label": "EPS growth 5y",
-     "category": "Growth", "higher_better": True, "target_only": True},
+     "category": "Growth", "higher_better": True, "target_only": True,
+     "target_only_reason": "Requires multi-year EPS per peer (not in snapshot)"},
 
     # ---- Profitability ----
     {"metric": "operating_margin", "label": "Operating margin",
@@ -220,7 +228,8 @@ _METRIC_DEFS: list[dict] = [
     {"metric": "roe", "label": "ROE",
      "category": "Profitability", "higher_better": True},
     {"metric": "fcf_margin", "label": "FCF margin",
-     "category": "Profitability", "higher_better": True, "target_only": True},
+     "category": "Profitability", "higher_better": True, "target_only": True,
+     "target_only_reason": "Requires FCF per peer (not in snapshot)"},
 
     # ---- Solvency ----
     {"metric": "debt_to_equity", "label": "Debt / Equity",
@@ -243,6 +252,7 @@ _METRIC_DEFS: list[dict] = [
 def _value_for(p: PeerSnapshot, metric: str) -> Optional[float]:
     """Map a snapshot + metric key → numeric value."""
     return {
+        "revenue_growth_1y": _revenue_yoy_peer,
         "operating_margin": _operating_margin,
         "net_margin":       _net_margin,
         "roe":              _roe,
@@ -270,10 +280,9 @@ def compute_peer_rankings(
 
     # Compute the target-only values once
     target_only_values: dict[str, Optional[float]] = {
-        "revenue_growth_5y": _revenue_growth_5y(target_income),
-        "fcf_growth_5y":     _fcf_growth_5y(target_cash),
-        "eps_growth_5y":     _eps_growth_5y(target_income),
-        "fcf_margin":        _fcf_margin(target_income, target_cash),
+        "fcf_growth_5y": _fcf_growth_5y(target_cash),
+        "eps_growth_5y": _eps_growth_5y(target_income),
+        "fcf_margin":    _fcf_margin(target_income, target_cash),
     }
 
     # Synthetic snapshot for snapshot-style metrics
@@ -296,6 +305,7 @@ def compute_peer_rankings(
         revenue=_pick(last_inc, "revenue"),
         ebitda=_pick(last_inc, "ebitda"),
         book_value=_pick(last_bal, "totalStockholdersEquity", "totalEquity"),
+        revenue_yoy=_revenue_growth_1y(target_income),
     )
 
     by_category: dict[str, list[MetricRanking]] = {}
@@ -339,6 +349,7 @@ def compute_peer_rankings(
             percentile=percentile, rank=rank,
             n_peers=len(peer_vals_clean),
             band=band, flag=flag,
+            target_only_reason=spec.get("target_only_reason", ""),
         )
         by_category.setdefault(spec["category"], []).append(ranking)
         if percentile is not None:

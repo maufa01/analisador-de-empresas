@@ -33,6 +33,51 @@ def _bar_color(percentile: Optional[float]) -> str:
     return "rgba(184,115,51,0.85)"          # muted copper — bottom quartile
 
 
+# Absolute "good-value" caps per metric: where a target-only bar would
+# fill 100%. Without peer percentile we lean on sector-agnostic bands
+# loosely calibrated to S&P 500 medians (e.g. ~10% net margin, ~15% ROE,
+# P/E mid-20s in normal markets).
+_HIGHER_BETTER_CAPS: dict[str, float] = {
+    "operating_margin":  50.0,
+    "net_margin":        30.0,
+    "fcf_margin":        30.0,
+    "roe":               30.0,
+    "revenue_growth_1y": 30.0,
+    "fcf_growth_5y":     30.0,
+    "eps_growth_5y":     30.0,
+    "earnings_yield":    10.0,
+}
+_LOWER_BETTER_CAPS: dict[str, float] = {
+    "pe":              30.0,
+    "ev_ebitda":       20.0,
+    "ps":              10.0,
+    "pb":               8.0,
+    "debt_to_equity":   2.0,
+}
+
+
+def _target_only_bar(metric: MetricRanking) -> tuple[float, str]:
+    """Return (fill_percent, color) for a target-only row.
+
+    No peer baseline → map the raw target value through absolute
+    market-norm thresholds. Net margin 30% (or higher) fills the bar;
+    P/E 0 fills it, P/E ≥ 30 empties it. Color reuses the percentile
+    palette so a 90%-filled bar still reads green.
+    """
+    v = metric.target_value
+    if v is None:
+        return 0.0, "var(--text-muted)"
+    if metric.higher_better:
+        cap = _HIGHER_BETTER_CAPS.get(metric.metric, 50.0)
+        fill = (v / cap) * 100.0 if cap > 0 else 0.0
+    else:
+        cap = _LOWER_BETTER_CAPS.get(metric.metric, 30.0)
+        # value at 0 ⇒ best; value ≥ cap ⇒ empty.
+        fill = (1.0 - v / cap) * 100.0 if (v > 0 and cap > 0) else 100.0
+    fill = max(0.0, min(100.0, fill))
+    return fill, _bar_color(fill)
+
+
 def _fmt_value(metric: MetricRanking) -> str:
     if metric.target_value is None:
         return "—"
@@ -68,12 +113,14 @@ def _row_html(metric: MetricRanking) -> str:
             f'font-variant-numeric:tabular-nums;">p={pct_text}</span>'
         )
 
-    # Bar: hidden when target-only since there's nothing to rank against
+    # Bar: target-only rows fill via absolute market-norm thresholds
+    # (no peer baseline); other rows fill at their peer percentile.
     if is_target_only:
+        to_fill, to_color = _target_only_bar(metric)
         bar_html = (
             '<div style="background:var(--surface-raised); height:6px; '
-            'border-radius:3px; overflow:hidden; opacity:0.4;">'
-            '<div style="width:0%; height:100%;"></div>'
+            'border-radius:3px; overflow:hidden;">'
+            f'<div style="background:{to_color}; width:{to_fill}%; height:100%;"></div>'
             '</div>'
         )
     else:
@@ -88,12 +135,13 @@ def _row_html(metric: MetricRanking) -> str:
     # Footer: explicit message for target-only rows; flag + band + peer
     # count for everything else.
     if is_target_only:
+        reason = (metric.target_only_reason
+                  or "Peer data unavailable for this metric.")
         footer_html = (
             '<div style="margin-top:4px;">'
             '<span style="color:var(--text-muted); font-size:11px; '
             'font-style:italic;">'
-            'Target-only metric — peer historical data unavailable until '
-            'FMP is wired in.'
+            f'Target-only — {reason}'
             '</span></div>'
         )
     elif metric.n_peers < 3:

@@ -62,6 +62,31 @@ def _color_for_value(val, view: str) -> str:
     return "var(--text-primary)"
 
 
+def _cap_to_recent_years(df: pd.DataFrame, years: int) -> pd.DataFrame:
+    """Deduplica columnas por año fiscal (keep latest period per year)
+    y devuelve los últimos N años ordenados ascendente.
+
+    Why: SEC EDGAR + yfinance + FMP combined puede tener múltiples
+    period_end dentro del mismo fiscal year (Apple FY 2008 históricamente
+    aparece 4+ veces por variaciones de filing). Sin dedup se ven columnas
+    duplicadas tipo FY 2008 x4 en la UI.
+    """
+    if df is None or df.empty or years <= 0:
+        return df
+    try:
+        cols = pd.to_datetime(df.columns, errors="coerce")
+    except (TypeError, ValueError):
+        return df.iloc[:, -years:]
+    if cols.isna().all():
+        return df.iloc[:, -years:]
+    order = cols.argsort()
+    df_sorted = df.iloc[:, order]
+    cols_sorted = cols[order]
+    keep_mask = ~pd.Series(cols_sorted.year).duplicated(keep="last").values
+    df_dedup = df_sorted.iloc[:, keep_mask]
+    return df_dedup.iloc[:, -years:]
+
+
 def _render_statement_table(
     df: pd.DataFrame, line_specs: list, *, view: str,
 ) -> None:
@@ -292,10 +317,11 @@ def render_financial_statements_panel(ticker: str) -> None:
 
     with sub[1]:
         df, eff_view = _select_view_df(stmts, "income", view)
-        df = df.iloc[:, :years] if not df.empty else df
+        df = _cap_to_recent_years(df, years)
         _render_statement_table(df, INCOME_LINES, view=eff_view)
         if eff_view == "Absolute":
-            fig = _trend_chart(stmts.income, ["revenue", "net_income"],
+            chart_df = _cap_to_recent_years(stmts.income, years)
+            fig = _trend_chart(chart_df, ["revenue", "net_income"],
                                 "Revenue & Net income")
             if fig is not None:
                 st.plotly_chart(fig, use_container_width=True,
@@ -303,10 +329,11 @@ def render_financial_statements_panel(ticker: str) -> None:
 
     with sub[2]:
         df, eff_view = _select_view_df(stmts, "balance", view)
-        df = df.iloc[:, :years] if not df.empty else df
+        df = _cap_to_recent_years(df, years)
         _render_statement_table(df, BALANCE_LINES, view=eff_view)
         if eff_view == "Absolute":
-            fig = _trend_chart(stmts.balance,
+            chart_df = _cap_to_recent_years(stmts.balance, years)
+            fig = _trend_chart(chart_df,
                                 ["total_assets", "stockholders_equity"],
                                 "Total assets & Equity")
             if fig is not None:
@@ -315,11 +342,12 @@ def render_financial_statements_panel(ticker: str) -> None:
 
     with sub[3]:
         df, eff_view = _select_view_df(stmts, "cashflow", view)
-        df = df.iloc[:, :years] if not df.empty else df
+        df = _cap_to_recent_years(df, years)
         _render_statement_table(df, CASHFLOW_LINES, view=eff_view)
         if eff_view == "Absolute":
+            chart_df = _cap_to_recent_years(stmts.cashflow, years)
             fig = _trend_chart(
-                stmts.cashflow,
+                chart_df,
                 ["operating_cash_flow", "free_cash_flow"],
                 "Operating cash flow & FCF",
             )
