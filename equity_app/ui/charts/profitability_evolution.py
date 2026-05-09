@@ -1,17 +1,13 @@
-"""
-ROIC / ROCE / ROA evolution — three lines, one panel.
-
-ROCE = EBIT / (Total Assets − Current Liabilities)
-ROIC and ROA come from :mod:`analysis.ratios`.
-"""
+"""ROIC / ROCE / ROA evolution — three lines, consistent palette."""
 from __future__ import annotations
 
 import pandas as pd
 import plotly.graph_objects as go
 
 from analysis.ratios import _get, roic, roa
-from ui.theme import (
-    BORDER, GAINS, LOSSES, SURFACE, TEXT_MUTED, TEXT_SECONDARY,
+from ui.charts import (
+    CHART_HEIGHT, COLOR_GROWTH, COLOR_NEUTRAL, COLOR_PRIMARY,
+    COLOR_TEXT_MUTED, _annotate_last, _base_layout, _empty_layout, _fy_labels,
 )
 
 
@@ -30,44 +26,56 @@ def build_profitability_evolution(
     balance: pd.DataFrame,
     cash: pd.DataFrame,
     *,
-    height: int = 380,
+    height: int = CHART_HEIGHT,
 ) -> go.Figure:
-    roic_s = roic(income, balance)
-    roa_s = roa(income, balance)
-    roce_s = _roce(income, balance)
-
     fig = go.Figure()
 
-    def _add(series, name, color):
-        if series is None:
-            return
-        s = series.dropna()
+    series = [
+        ("ROIC", roic(income, balance), COLOR_GROWTH),
+        ("ROCE", _roce(income, balance), COLOR_PRIMARY),
+        ("ROA",  roa(income, balance),   COLOR_NEUTRAL),
+    ]
+
+    plotted = 0
+    last_roic_pct: float | None = None
+    for label, raw, color in series:
+        if raw is None:
+            continue
+        s = raw.dropna()
         if s.empty:
-            return
+            continue
+        x = _fy_labels(s.index)
+        y_pct = (s.values * 100.0)
         fig.add_trace(go.Scatter(
-            x=s.index, y=s.values * 100.0,
-            mode="lines+markers+text",
-            name=name,
+            x=x, y=y_pct,
+            mode="lines+markers", name=label,
             line=dict(color=color, width=2),
-            marker=dict(size=8),
-            text=[f"{v*100:.0f}%" for v in s.values],
-            textposition="top center",
-            textfont=dict(size=10, color=color),
+            marker=dict(size=6),
+            hovertemplate=f"<b>%{{x}}</b><br>{label} %{{y:.1f}}%<extra></extra>",
+            showlegend=False,
         ))
+        _annotate_last(fig, x, y_pct,
+                       label=f"{label} {y_pct[-1]:.0f}%", color=color)
+        if label == "ROIC":
+            last_roic_pct = float(y_pct[-1])
+        plotted += 1
 
-    _add(roic_s, "ROIC", "#3B82F6")
-    _add(roce_s, "ROCE", "#C9A961")
-    _add(roa_s, "ROA", LOSSES)
+    if plotted == 0:
+        fig.update_layout(**_empty_layout("No profitability data", height=height))
+        return fig
 
-    fig.update_layout(
-        title=dict(text="Profitability Evolution",
-                   font=dict(color=TEXT_SECONDARY, size=14)),
-        plot_bgcolor=SURFACE, paper_bgcolor=SURFACE,
-        font=dict(color=TEXT_SECONDARY, family="Inter, sans-serif", size=11),
-        height=height,
-        yaxis=dict(title="%", gridcolor=BORDER, color=TEXT_MUTED, ticksuffix="%"),
-        xaxis=dict(gridcolor=BORDER, color=TEXT_MUTED),
-        legend=dict(orientation="h", yanchor="top", y=1.12),
-        margin=dict(l=0, r=0, t=50, b=0),
-    )
+    fig.update_layout(**_base_layout(height=height, y_ticksuffix="%"))
+
+    # Anomaly note: ROIC > 50% is mathematically valid but typically
+    # signals reduced book equity from buybacks (e.g. AAPL FY24/25).
+    # Surface it so the reader doesn't take a 100%+ ROIC at face value.
+    if last_roic_pct is not None and last_roic_pct > 50:
+        fig.add_annotation(
+            xref="paper", yref="paper",
+            x=1.0, y=1.06,
+            xanchor="right", yanchor="bottom",
+            showarrow=False,
+            text="ROIC inflated by reduced book equity (buybacks)",
+            font=dict(size=9, color=COLOR_TEXT_MUTED),
+        )
     return fig

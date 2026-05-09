@@ -1,20 +1,13 @@
-"""
-Owner Earnings vs Free Cash Flow — Buffett-style cash-generation view.
-
-Owner Earnings = NI + D&A − maintenance capex − ΔWC, where maintenance
-capex is approximated by rolling-N-year average D&A (Greenwald-style).
-The chart overlays Owner Earnings against reported FCF to surface
-gaps — persistent FCF > OE is a soft warning that capex hasn't kept
-pace with depreciation.
-"""
+"""Owner Earnings (Buffett-style) vs Free Cash Flow."""
 from __future__ import annotations
 
 import pandas as pd
 import plotly.graph_objects as go
 
 from analysis.ratios import owner_earnings, free_cash_flow
-from ui.theme import (
-    ACCENT, BORDER, GAINS, SURFACE, TEXT_MUTED, TEXT_SECONDARY,
+from ui.charts import (
+    CHART_HEIGHT, COLOR_GROWTH, COLOR_PRIMARY, COLOR_REFERENCE,
+    COLOR_TEXT_MUTED, _annotate_last, _base_layout, _empty_layout, _fy_labels,
 )
 
 
@@ -25,42 +18,62 @@ def build_owner_earnings_chart(
     *,
     height: int = 380,
 ) -> go.Figure:
+    fig = go.Figure()
+
     oe = owner_earnings(income, balance, cash)
     fcf = free_cash_flow(cash)
 
-    fig = go.Figure()
-
+    plotted = 0
     if oe is not None:
         s = oe.dropna()
         if not s.empty:
+            x = _fy_labels(s.index)
+            y = (s.values / 1e9)
             fig.add_trace(go.Bar(
-                x=s.index, y=(s.values / 1e9),
+                x=x, y=y,
                 name="Owner Earnings",
-                marker_color=ACCENT,
-                text=[f"${v/1e9:.1f}B" for v in s.values],
-                textposition="outside",
+                marker_color=COLOR_PRIMARY,
+                hovertemplate="<b>%{x}</b><br>Owner Earnings $%{y:,.2f}B<extra></extra>",
+                showlegend=False,
             ))
+            _annotate_last(fig, x, y,
+                           label=f"OE ${y[-1]:,.1f}B", color=COLOR_PRIMARY)
+
+            # 5y average reference line
+            avg = float(s.tail(5).mean()) / 1e9
+            if avg > 0:
+                fig.add_hline(
+                    y=avg, line_dash="dash", line_color=COLOR_REFERENCE,
+                    opacity=0.7,
+                    annotation_text=f"5y avg ${avg:,.1f}B",
+                    annotation_position="bottom right",
+                    annotation_font=dict(size=9, color=COLOR_TEXT_MUTED),
+                )
+            plotted += 1
 
     if fcf is not None:
         s = fcf.dropna()
         if not s.empty:
+            x = _fy_labels(s.index)
+            y = (s.values / 1e9)
             fig.add_trace(go.Scatter(
-                x=s.index, y=(s.values / 1e9),
+                x=x, y=y,
                 name="Free Cash Flow",
-                line=dict(color=GAINS, width=2, dash="dot"),
-                marker=dict(size=7),
+                line=dict(color=COLOR_GROWTH, width=2, dash="dot"),
+                marker=dict(size=6),
                 mode="lines+markers",
+                hovertemplate="<b>%{x}</b><br>FCF $%{y:,.2f}B<extra></extra>",
+                showlegend=False,
             ))
+            _annotate_last(fig, x, y,
+                           label=f"FCF ${y[-1]:,.1f}B", color=COLOR_GROWTH)
+            plotted += 1
 
-    fig.update_layout(
-        title=dict(text="Owner Earnings (Buffett) vs FCF",
-                   font=dict(color=TEXT_SECONDARY, size=14)),
-        plot_bgcolor=SURFACE, paper_bgcolor=SURFACE,
-        font=dict(color=TEXT_SECONDARY, family="Inter, sans-serif", size=11),
-        height=height,
-        yaxis=dict(title="$B", gridcolor=BORDER, color=TEXT_MUTED),
-        xaxis=dict(gridcolor=BORDER, color=TEXT_MUTED),
-        legend=dict(orientation="h", y=1.12),
-        margin=dict(l=0, r=0, t=50, b=0),
-    )
+    if plotted == 0:
+        fig.update_layout(**_empty_layout("Owner Earnings unavailable", height=height))
+        return fig
+
+    fig.update_layout(**_base_layout(
+        height=height, y_tickprefix="$", y_ticksuffix="B",
+    ))
     return fig
