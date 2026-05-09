@@ -74,7 +74,10 @@ def _target_only_bar(metric: MetricRanking) -> tuple[float, str]:
         cap = _LOWER_BETTER_CAPS.get(metric.metric, 30.0)
         # value at 0 ⇒ best; value ≥ cap ⇒ empty.
         fill = (1.0 - v / cap) * 100.0 if (v > 0 and cap > 0) else 100.0
-    fill = max(0.0, min(100.0, fill))
+    # Floor at 4% so the chip stays visible even for "off-the-chart"
+    # values (P/E 50, P/B 60, etc.) — visually signals "way over cap"
+    # instead of disappearing entirely.
+    fill = max(4.0, min(100.0, fill))
     return fill, _bar_color(fill)
 
 

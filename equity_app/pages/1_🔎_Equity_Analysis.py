@@ -1450,6 +1450,31 @@ with tab_financials:
     bal5  = _dedup_and_cap_years(bal)
     cf5   = _dedup_and_cap_years(cf)
 
+    # Cross-statement enrichment: SEC EDGAR ships D&A in cash flow (not
+    # income) and never ships freeCashFlow — both are needed for the
+    # hybrid layout's derived rows (% EBITDA margin, % FCF margin etc.).
+    inc5 = inc5.copy() if not inc5.empty else inc5
+    cf5  = cf5.copy()  if not cf5.empty  else cf5
+    if (not inc5.empty and not cf5.empty
+            and "depreciationAndAmortization" not in inc5.columns
+            and "depreciationAndAmortization" in cf5.columns):
+        inc5["depreciationAndAmortization"] = cf5["depreciationAndAmortization"]
+    if (not inc5.empty
+            and "ebitda" not in inc5.columns
+            and "operatingIncome" in inc5.columns
+            and "depreciationAndAmortization" in inc5.columns):
+        inc5["ebitda"] = (inc5["operatingIncome"]
+                          + inc5["depreciationAndAmortization"].fillna(0.0))
+    if (not cf5.empty and not inc5.empty
+            and "revenue" in inc5.columns and "revenue" not in cf5.columns):
+        cf5["revenue"] = inc5["revenue"]
+    if (not cf5.empty
+            and "freeCashFlow" not in cf5.columns
+            and "operatingCashFlow" in cf5.columns
+            and "capitalExpenditure" in cf5.columns):
+        cf5["freeCashFlow"] = (cf5["operatingCashFlow"]
+                               - cf5["capitalExpenditure"])
+
     st.plotly_chart(
         build_income_chart(inc5, height=200),
         use_container_width=True, config={"displayModeBar": False},
