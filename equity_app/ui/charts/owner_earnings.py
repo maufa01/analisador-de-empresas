@@ -23,6 +23,17 @@ def build_owner_earnings_chart(
     oe = owner_earnings(income, balance, cash)
     fcf = free_cash_flow(cash)
 
+    # Build the full chronological x-axis up front so the categorical
+    # axis doesn't reorder entries by "first seen" (otherwise FY with
+    # NaN in OE — typical when D&A rolling avg needs lookback — ends up
+    # at the right end after FCF introduces it).
+    full_idx: pd.Index = pd.Index([])
+    if oe is not None:
+        full_idx = full_idx.union(oe.dropna().index)
+    if fcf is not None:
+        full_idx = full_idx.union(fcf.dropna().index)
+    full_x = _fy_labels(sorted(full_idx))
+
     plotted = 0
     if oe is not None:
         s = oe.dropna()
@@ -73,7 +84,9 @@ def build_owner_earnings_chart(
         fig.update_layout(**_empty_layout("Owner Earnings unavailable", height=height))
         return fig
 
-    fig.update_layout(**_base_layout(
-        height=height, y_tickprefix="$", y_ticksuffix="B",
-    ))
+    layout = _base_layout(height=height, y_tickprefix="$", y_ticksuffix="B")
+    if full_x:
+        layout["xaxis"]["categoryorder"] = "array"
+        layout["xaxis"]["categoryarray"] = full_x
+    fig.update_layout(**layout)
     return fig
