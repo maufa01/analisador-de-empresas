@@ -44,6 +44,7 @@ class PeerSnapshot:
     ev_ebitda: Optional[float] = None
     ps: Optional[float] = None
     pb: Optional[float] = None
+    revenue_yoy: Optional[float] = None  # YoY revenue growth in % (e.g. 12.5 for +12.5%)
 
 
 @dataclass

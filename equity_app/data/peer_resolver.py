@@ -94,7 +94,7 @@ def _hydrate_one(t: str) -> PeerSnapshot:
         from data.fmp_provider import FMPProvider
         prov = FMPProvider()
         profile = prov.fetch_profile(t)
-        km = prov.fetch_key_metrics(t, years=1)
+        km = prov.fetch_key_metrics(t, years=2)
     except Exception:
         return PeerSnapshot(ticker=t)
 
@@ -123,12 +123,42 @@ def _hydrate_one(t: str) -> PeerSnapshot:
         if ev and ev_to_ebitda:
             ebitda = ev / ev_to_ebitda
 
+        # Net income via earnings yield × fiscal market cap
+        fiscal_mcap = _f("marketCap")
+        earnings_yield = _f("earningsYield")
+        net_income = None
+        if fiscal_mcap and earnings_yield:
+            net_income = fiscal_mcap * earnings_yield
+
+        # Book value via ROE
+        roe = _f("returnOnEquity")
+        book_value = None
+        if net_income and roe and roe > 0:
+            book_value = net_income / roe
+
+        # Revenue YoY from prev-year row of key_metrics
+        revenue_yoy = None
+        if len(km) >= 2:
+            prev = km.iloc[-2]
+            try:
+                prev_ev = float(prev.get("enterpriseValue") or 0)
+                prev_evs = float(prev.get("evToSales") or 0)
+                if prev_ev > 0 and prev_evs > 0 and revenue:
+                    prev_revenue = prev_ev / prev_evs
+                    if prev_revenue > 0:
+                        revenue_yoy = (revenue / prev_revenue - 1.0) * 100.0
+            except (TypeError, ValueError):
+                revenue_yoy = None
+
     return PeerSnapshot(
         ticker=t,
         market_cap=mcap if (mcap is not None and float(mcap) > 0) else None,
         enterprise_value=ev,
         revenue=revenue,
         ebitda=ebitda,
+        net_income=net_income,
+        book_value=book_value,
+        revenue_yoy=revenue_yoy,
     )
 
 
