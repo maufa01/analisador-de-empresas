@@ -303,7 +303,10 @@ def compute_peer_rankings(
         enterprise_value=target_enterprise_value,
         net_income=_pick(last_inc, "netIncome"),
         revenue=_pick(last_inc, "revenue"),
-        ebitda=_pick(last_inc, "ebitda"),
+        # SEC EDGAR doesn't ship ebitda — fall back to operatingIncome so
+        # _operating_margin still produces a value (it underestimates by
+        # D&A but that's <5% of revenue for most names).
+        ebitda=_pick(last_inc, "ebitda", "operatingIncome"),
         book_value=_pick(last_bal, "totalStockholdersEquity", "totalEquity"),
         revenue_yoy=_revenue_growth_1y(target_income),
     )

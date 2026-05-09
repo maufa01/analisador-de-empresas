@@ -742,9 +742,22 @@ st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
 if peers_demo:
     market_cap_pr = market_cap_live
     enterprise_value_pr = None
-    if market_cap_pr is not None and "totalDebt" in bal.columns:
+    # SEC EDGAR doesn't ship a single `totalDebt` XBRL element — fall
+    # back to longTermDebt + shortTermDebt (either of which may be
+    # absent). Subtracting cash to reach net debt is technically more
+    # accurate but EV proxy without cash is the convention here.
+    if market_cap_pr is not None:
         try:
-            enterprise_value_pr = market_cap_pr + float(bal["totalDebt"].iloc[-1])
+            debt_proxy = 0.0
+            for col in ("totalDebt", "longTermDebt", "shortTermDebt",
+                        "currentPortionOfLongTermDebt"):
+                if col in bal.columns:
+                    v = bal[col].iloc[-1]
+                    if pd.notna(v):
+                        debt_proxy += float(v)
+                        if col == "totalDebt":
+                            break
+            enterprise_value_pr = market_cap_pr + debt_proxy
         except Exception:
             enterprise_value_pr = None
     ranking = compute_peer_rankings(
