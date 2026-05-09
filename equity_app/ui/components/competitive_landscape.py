@@ -253,12 +253,16 @@ def render_competitive_landscape(
 
     rows: list[dict] = []
     for p in all_subjects:
+        # Skip peers that came back empty (e.g. ticker not in FMP)
+        if p.ticker != target_ticker and p.market_cap is None and p.revenue is None:
+            continue
         rows.append({
             "Ticker":         p.ticker,
             "Market cap":     _safe(p.market_cap),
             "Revenue":        _safe(p.revenue),
             "Revenue YoY %":  (_revenue_yoy(target_income)
-                               if p.ticker == target_ticker else None),
+                               if p.ticker == target_ticker
+                               else p.revenue_yoy),
             "Net margin %":   _net_margin(p),
             "P/E":            _pe(p),
             "ROE %":          _roe(p),
@@ -294,17 +298,20 @@ def render_competitive_landscape(
                 styles.append("")
         return styles
 
-    styled = df.style.apply(_color_col, axis=0).set_properties(
-        subset=pd.IndexSlice[[target_ticker], :],
-        **{"font-weight": "500"},
+    styled = (
+        df.style
+        .apply(_color_col, axis=0)
+        .format({"Market cap": _fmt_money, "Revenue": _fmt_money}, na_rep="—")
+        .set_properties(
+            subset=pd.IndexSlice[[target_ticker], :],
+            **{"font-weight": "500"},
+        )
     )
 
     st.dataframe(
         styled,
         use_container_width=True,
         column_config={
-            "Market cap":    st.column_config.NumberColumn(format="$%.0f"),
-            "Revenue":       st.column_config.NumberColumn(format="$%.0f"),
             "Revenue YoY %": st.column_config.NumberColumn(format="%+.2f%%"),
             "Net margin %":  st.column_config.NumberColumn(format="%.2f%%"),
             "P/E":           st.column_config.NumberColumn(format="%.2fx"),
