@@ -40,9 +40,12 @@ inject_css()
 PAGES_DIR = ROOT / "pages"
 
 pages = [
-    st.Page(str(PAGES_DIR / "0_📊_Markets.py"),             title="Markets",            default=True),
-    st.Page(str(PAGES_DIR / "1_🔎_Equity_Analysis.py"),     title="Equity analysis"),
-    st.Page(str(PAGES_DIR / "2_📈_Portfolio_Optimizer.py"), title="Portfolio"),
+    st.Page(str(PAGES_DIR / "0_📊_Markets.py"),         title="Markets",          default=True),
+    st.Page(str(PAGES_DIR / "1_🔎_Equity_Analysis.py"), title="Equity analysis"),
+    st.Page(str(PAGES_DIR / "2_📈_Portfolio.py"),       title="Portfolio"),
+    st.Page(str(PAGES_DIR / "3_⚖_Compare.py"),          title="Compare"),
+    st.Page(str(PAGES_DIR / "4_📓_Journal.py"),         title="Journal"),
+    st.Page(str(PAGES_DIR / "9_🔧_Health.py"),          title="Health"),
 ]
 
 # st.navigation with position="top" requires Streamlit >= 1.43.
