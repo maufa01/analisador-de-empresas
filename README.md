@@ -5,6 +5,7 @@ Análisis fundamental + DCF + múltiplos comparables + optimización Markowitz.
 ## Quick start
 
 ```bash
+
 pip install -r requirements.txt
 
 # Demo CLI
