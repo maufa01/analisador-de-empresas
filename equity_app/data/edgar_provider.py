@@ -265,15 +265,21 @@ def _facts_units(facts: dict, metric_key: str) -> Optional[list]:
     if "facts" not in facts or "us-gaap" not in facts.get("facts", {}):
         return None
     gaap = facts["facts"]["us-gaap"]
+    merged: list = []
     for alias in _GAAP_ALIASES.get(metric_key, [metric_key]):
-        if alias in gaap:
-            units = gaap[alias].get("units", {})
-            for unit_key in ("USD", "shares", "USD/shares"):
-                if unit_key in units:
-                    return units[unit_key]
-            if units:
-                return next(iter(units.values()))
-    return None
+        if alias not in gaap:
+            continue
+        units = gaap[alias].get("units", {})
+        picked = None
+        for unit_key in ("USD", "shares", "USD/shares"):
+            if unit_key in units:
+                picked = units[unit_key]
+                break
+        if picked is None and units:
+            picked = next(iter(units.values()))
+        if picked:
+            merged.extend(picked)
+    return merged or None
 
 
 # ============================================================
