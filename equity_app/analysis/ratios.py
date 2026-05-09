@@ -319,14 +319,33 @@ def effective_tax_rate(income: pd.DataFrame, periods: int | None = 3) -> float:
 # ============================================================
 # Solvency / liquidity
 # ============================================================
-def debt_to_equity(balance: pd.DataFrame) -> Optional[pd.Series]:
+def _resolve_total_debt(balance: pd.DataFrame) -> Optional[pd.Series]:
+    """Total debt with LT+ST fallback. SEC EDGAR's `total_debt` mapping
+    sometimes lands on a partial XBRL element — prefer it when present
+    but fall back to longTermDebt + shortTermDebt so leverage ratios
+    don't silently report ~0% for companies that have real debt."""
     debt = _get(balance, "total_debt")
+    if debt is not None:
+        return debt
+    ltd = _get(balance, "long_term_debt")
+    std = _get(balance, "short_term_debt")
+    if ltd is None and std is None:
+        return None
+    if ltd is None:
+        return std
+    if std is None:
+        return ltd
+    return ltd.add(std, fill_value=0.0)
+
+
+def debt_to_equity(balance: pd.DataFrame) -> Optional[pd.Series]:
+    debt = _resolve_total_debt(balance)
     eq = _get(balance, "total_equity")
     return _safe_div(debt, eq)
 
 
 def debt_to_ebitda(income: pd.DataFrame, balance: pd.DataFrame) -> Optional[pd.Series]:
-    debt = _get(balance, "total_debt")
+    debt = _resolve_total_debt(balance)
     ebitda = _get(income, "ebitda")
     return _safe_div(debt, ebitda)
 
@@ -334,7 +353,7 @@ def debt_to_ebitda(income: pd.DataFrame, balance: pd.DataFrame) -> Optional[pd.S
 def net_debt_to_ebitda(
     income: pd.DataFrame, balance: pd.DataFrame
 ) -> Optional[pd.Series]:
-    debt = _get(balance, "total_debt")
+    debt = _resolve_total_debt(balance)
     cash = _get(balance, "cash_eq")
     ebitda = _get(income, "ebitda")
     if debt is None or ebitda is None:

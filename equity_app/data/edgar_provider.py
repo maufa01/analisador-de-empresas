@@ -242,7 +242,7 @@ _GAAP_ALIASES: dict[str, list[str]] = {
     "current_liabilities":   ["LiabilitiesCurrent"],
     "accounts_payable":      ["AccountsPayableCurrent"],
     "long_term_debt":        ["LongTermDebt", "LongTermDebtNoncurrent"],
-    "total_debt":            ["DebtCurrent", "DebtLongtermAndShorttermCombinedAmount"],
+    "total_debt":            ["DebtLongtermAndShorttermCombinedAmount"],
     "stockholders_equity":   ["StockholdersEquity",
                               "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
 
