@@ -33,3 +33,4 @@ secrets.toml
 .idea/
 *.swp
 .DS_Store
+.claude/

@@ -81,6 +81,7 @@ def detect_reit(
     if sector == "Real Estate":
         mcap = (
             (fmp_profile or {}).get("mktCap")
+            or (fmp_profile or {}).get("marketCap")
             or (yf_info or {}).get("marketCap")
             or 0
         )

@@ -423,7 +423,7 @@ def _profile_to_info(p: dict) -> dict:
     overrides this with ``weightedAverageShsOut`` from key-metrics.
     """
     price = _to_float(p.get("price"))
-    mcap = _to_float(p.get("mktCap"))
+    mcap = _to_float(p.get("mktCap") or p.get("marketCap"))
     shares_out = (mcap / price) if (price and mcap) else None
 
     last_div = _to_float(p.get("lastDiv"))

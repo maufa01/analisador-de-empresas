@@ -229,9 +229,9 @@ def _from_fmp(ticker: str) -> Optional[FinancialsBundle]:
         return None
     try:
         prov = FMPProvider()
-        income  = prov.fetch_income_statement(ticker, years=10)
-        balance = prov.fetch_balance_sheet(ticker, years=10)
-        cash    = prov.fetch_cash_flow(ticker, years=10)
+        income  = prov.fetch_income_statement(ticker, years=5)
+        balance = prov.fetch_balance_sheet(ticker, years=5)
+        cash    = prov.fetch_cash_flow(ticker, years=5)
     except (MissingAPIKeyError, TickerNotFoundError, ProviderError):
         return None
     except Exception:
@@ -706,7 +706,7 @@ def _info_from_fmp(ticker: str) -> ProviderResult:
         "website":            p.get("website"),
         "description":        p.get("description"),
         "employees":          p.get("fullTimeEmployees"),
-        "market_cap":         p.get("mktCap"),
+        "market_cap":         p.get("mktCap") or p.get("marketCap"),
         # /profile carries shares as a separate field on some plans;
         # downstream code can also fall back to key_metrics.
         "shares_outstanding": _safe_int(p.get("sharesOutstanding")),

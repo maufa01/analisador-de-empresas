@@ -327,6 +327,45 @@ live_info = bundle.info
 live_quote = bundle.quote
 inc, bal, cf = bundle.income, bundle.balance, bundle.cash
 ratios = calculate_ratios(inc, bal, cf)
+
+# 5-year capped + cross-statement enriched copies for display (charts,
+# tables). SEC EDGAR splits D&A into cash flow and never ships ebitda /
+# totalDebt / freeCashFlow as standalone columns — reconstruct them
+# here once so every renderer downstream gets the same shape.
+inc5 = _dedup_and_cap_years(inc).copy() if not inc.empty else inc
+bal5 = _dedup_and_cap_years(bal).copy() if not bal.empty else bal
+cf5  = _dedup_and_cap_years(cf).copy()  if not cf.empty  else cf
+
+if (not inc5.empty and not cf5.empty
+        and "depreciationAndAmortization" not in inc5.columns
+        and "depreciationAndAmortization" in cf5.columns):
+    inc5["depreciationAndAmortization"] = cf5["depreciationAndAmortization"]
+if (not inc5.empty
+        and "ebitda" not in inc5.columns
+        and "operatingIncome" in inc5.columns
+        and "depreciationAndAmortization" in inc5.columns):
+    inc5["ebitda"] = (inc5["operatingIncome"]
+                      + inc5["depreciationAndAmortization"].fillna(0.0))
+if (not cf5.empty and not inc5.empty
+        and "revenue" in inc5.columns and "revenue" not in cf5.columns):
+    cf5["revenue"] = inc5["revenue"]
+if (not cf5.empty
+        and "freeCashFlow" not in cf5.columns
+        and "operatingCashFlow" in cf5.columns
+        and "capitalExpenditure" in cf5.columns):
+    cf5["freeCashFlow"] = (cf5["operatingCashFlow"]
+                           - cf5["capitalExpenditure"])
+# totalDebt = longTermDebt + shortTermDebt + currentPortion (whichever
+# exist). SEC EDGAR doesn't ship a single XBRL element for it.
+if not bal5.empty and "totalDebt" not in bal5.columns:
+    debt_total = None
+    for col in ("longTermDebt", "shortTermDebt",
+                "currentPortionOfLongTermDebt"):
+        if col in bal5.columns:
+            part = bal5[col].fillna(0.0)
+            debt_total = part if debt_total is None else debt_total + part
+    if debt_total is not None:
+        bal5["totalDebt"] = debt_total
 eq = assess_earnings_quality(inc, bal, cf)
 
 sector = bundle.sector or live_info.get("industry")
@@ -708,12 +747,12 @@ def _safe_float(v):
 
 def _safe_metric(row, key):
     """Pull row[key] and pass through _safe_float."""
-    if key not in row:
+    if row is None or key not in row:
         return None
     return _safe_float(row[key])
 
 
-last = ratios.iloc[-1]
+last = ratios.iloc[-1] if ratios is not None and not ratios.empty else None
 rev = _safe_metric(last, "Revenue")
 prev_rev = (_safe_float(ratios["Revenue"].iloc[-2])
             if "Revenue" in ratios.columns and len(ratios) >= 2 else None)
@@ -1446,35 +1485,8 @@ with tab_financials:
         'INCOME STATEMENT</div>',
         unsafe_allow_html=True,
     )
-    inc5  = _dedup_and_cap_years(inc)
-    bal5  = _dedup_and_cap_years(bal)
-    cf5   = _dedup_and_cap_years(cf)
-
-    # Cross-statement enrichment: SEC EDGAR ships D&A in cash flow (not
-    # income) and never ships freeCashFlow — both are needed for the
-    # hybrid layout's derived rows (% EBITDA margin, % FCF margin etc.).
-    inc5 = inc5.copy() if not inc5.empty else inc5
-    cf5  = cf5.copy()  if not cf5.empty  else cf5
-    if (not inc5.empty and not cf5.empty
-            and "depreciationAndAmortization" not in inc5.columns
-            and "depreciationAndAmortization" in cf5.columns):
-        inc5["depreciationAndAmortization"] = cf5["depreciationAndAmortization"]
-    if (not inc5.empty
-            and "ebitda" not in inc5.columns
-            and "operatingIncome" in inc5.columns
-            and "depreciationAndAmortization" in inc5.columns):
-        inc5["ebitda"] = (inc5["operatingIncome"]
-                          + inc5["depreciationAndAmortization"].fillna(0.0))
-    if (not cf5.empty and not inc5.empty
-            and "revenue" in inc5.columns and "revenue" not in cf5.columns):
-        cf5["revenue"] = inc5["revenue"]
-    if (not cf5.empty
-            and "freeCashFlow" not in cf5.columns
-            and "operatingCashFlow" in cf5.columns
-            and "capitalExpenditure" in cf5.columns):
-        cf5["freeCashFlow"] = (cf5["operatingCashFlow"]
-                               - cf5["capitalExpenditure"])
-
+    # inc5 / bal5 / cf5 are computed once at module level — already
+    # capped to 5y and cross-statement-enriched.
     st.plotly_chart(
         build_income_chart(inc5, height=200),
         use_container_width=True, config={"displayModeBar": False},
@@ -1891,7 +1903,7 @@ def _charts_tab_fragment(inc, bal, cf):
 
 
 with tab_charts:
-    _charts_tab_fragment(inc, bal, cf)
+    _charts_tab_fragment(inc5, bal5, cf5)
 
 
 # ============================================================
