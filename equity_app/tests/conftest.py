@@ -110,7 +110,7 @@ def make_fmp_quote():
             "name": "Apple Inc.",
             "price": 230.50,
             "change": 2.85,
-            "changesPercentage": 1.25,
+            "changePercentage": 1.25,
             "volume": 45_123_456,
             "marketCap": 3_500_000_000_000,
             "pe": 32.1,

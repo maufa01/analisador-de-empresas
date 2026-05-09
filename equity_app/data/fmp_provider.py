@@ -101,7 +101,7 @@ class FMPProvider(DataProvider):
             ticker=ticker,
             price=float(q.get("price") or 0.0),
             change=_to_float(q.get("change")),
-            change_pct=_to_float(q.get("changesPercentage")),
+            change_pct=_to_float(q.get("changePercentage")),
             volume=_to_float(q.get("volume")),
             market_cap=_to_float(q.get("marketCap")),
             pe=_to_float(q.get("pe")),
@@ -113,7 +113,7 @@ class FMPProvider(DataProvider):
             source=self.name,
         )
 
-    def fetch_company(self, ticker: str, years: int = 10) -> CompanyData:
+    def fetch_company(self, ticker: str, years: int = 5) -> CompanyData:
         ticker = ticker.upper().strip()
         try:
             profile = self.fetch_profile(ticker)
@@ -158,7 +158,7 @@ class FMPProvider(DataProvider):
         return data[0] if isinstance(data, list) else data
 
     @cached("financials", ttl=CACHE_TTL["financials"])
-    def fetch_income_statement(self, ticker: str, years: int = 10) -> pd.DataFrame:
+    def fetch_income_statement(self, ticker: str, years: int = 5) -> pd.DataFrame:
         data = self._get(
             "income-statement",
             symbol=ticker.upper().strip(),
@@ -168,7 +168,7 @@ class FMPProvider(DataProvider):
         return _to_dataframe(data)
 
     @cached("financials", ttl=CACHE_TTL["financials"])
-    def fetch_balance_sheet(self, ticker: str, years: int = 10) -> pd.DataFrame:
+    def fetch_balance_sheet(self, ticker: str, years: int = 5) -> pd.DataFrame:
         data = self._get(
             "balance-sheet-statement",
             symbol=ticker.upper().strip(),
@@ -178,7 +178,7 @@ class FMPProvider(DataProvider):
         return _to_dataframe(data)
 
     @cached("financials", ttl=CACHE_TTL["financials"])
-    def fetch_cash_flow(self, ticker: str, years: int = 10) -> pd.DataFrame:
+    def fetch_cash_flow(self, ticker: str, years: int = 5) -> pd.DataFrame:
         data = self._get(
             "cash-flow-statement",
             symbol=ticker.upper().strip(),
@@ -190,7 +190,7 @@ class FMPProvider(DataProvider):
     # ---- Quarterly variants (powering TTM column in hybrid view) ----
     @cached("financials", ttl=CACHE_TTL["financials"])
     def fetch_income_statement_quarterly(
-        self, ticker: str, quarters: int = 8,
+        self, ticker: str, quarters: int = 5,
     ) -> pd.DataFrame:
         try:
             data = self._get(
@@ -204,7 +204,7 @@ class FMPProvider(DataProvider):
 
     @cached("financials", ttl=CACHE_TTL["financials"])
     def fetch_balance_sheet_quarterly(
-        self, ticker: str, quarters: int = 8,
+        self, ticker: str, quarters: int = 5,
     ) -> pd.DataFrame:
         try:
             data = self._get(
@@ -218,7 +218,7 @@ class FMPProvider(DataProvider):
 
     @cached("financials", ttl=CACHE_TTL["financials"])
     def fetch_cash_flow_quarterly(
-        self, ticker: str, quarters: int = 8,
+        self, ticker: str, quarters: int = 5,
     ) -> pd.DataFrame:
         try:
             data = self._get(
@@ -231,7 +231,7 @@ class FMPProvider(DataProvider):
             return pd.DataFrame()
 
     @cached("fundamentals", ttl=CACHE_TTL["fundamentals"])
-    def fetch_key_metrics(self, ticker: str, years: int = 10) -> pd.DataFrame:
+    def fetch_key_metrics(self, ticker: str, years: int = 5) -> pd.DataFrame:
         try:
             data = self._get(
                 "key-metrics",
@@ -243,7 +243,7 @@ class FMPProvider(DataProvider):
             return pd.DataFrame()
 
     @cached("fundamentals", ttl=CACHE_TTL["fundamentals"])
-    def fetch_ratios(self, ticker: str, years: int = 10) -> pd.DataFrame:
+    def fetch_ratios(self, ticker: str, years: int = 5) -> pd.DataFrame:
         try:
             data = self._get(
                 "ratios",

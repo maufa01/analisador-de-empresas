@@ -138,7 +138,7 @@ def render_peer_comparison_quick(
                 styles.append("")
         return styles
 
-    styled = df.round(2).style.apply(_row_color, axis=1)
+    styled = df.style.format(precision=2, na_rep="—").apply(_row_color, axis=1)
 
     # Bold the target column
     styled = styled.set_properties(
