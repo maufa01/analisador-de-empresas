@@ -164,10 +164,13 @@ def _ensure_fcf(cashflow_wide: pd.DataFrame) -> pd.DataFrame:
         return cashflow_wide
     ocf = cashflow_wide.loc["operating_cash_flow"]
     if "capex" in cashflow_wide.index:
-        # Capex is reported as a NEGATIVE number on the cash flow statement,
-        # so OCF + capex = FCF (without taking abs).
+        # Sign convention is provider-dependent: FMP reports capex as a
+        # negative number (outflow), but SEC EDGAR's
+        # PaymentsToAcquirePropertyPlantAndEquipment is positive (gross
+        # payment). Using OCF − |capex| is correct under either convention
+        # and matches free_cash_flow() in analysis/ratios.py.
         capex = cashflow_wide.loc["capex"]
-        fcf = ocf + capex
+        fcf = ocf - capex.abs()
     else:
         fcf = ocf
     out = cashflow_wide.copy()

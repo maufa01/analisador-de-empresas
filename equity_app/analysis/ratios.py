@@ -172,7 +172,11 @@ def yoy_growth(series: pd.Series) -> pd.Series:
 # FCF & capex
 # ============================================================
 def free_cash_flow(cash: pd.DataFrame) -> Optional[pd.Series]:
-    """FCF = OCF + capex (capex is negative). Returns None if either missing."""
+    """FCF = OCF − |capex|. Defensive against sign convention: FMP
+    reports capex negative (outflow), SEC EDGAR's
+    PaymentsToAcquirePropertyPlantAndEquipment is positive (gross
+    payment). Using abs() makes the formula correct under either
+    convention. Returns None if OCF or capex is missing."""
     fcf_direct = _get(cash, "fcf")
     if fcf_direct is not None and not fcf_direct.dropna().empty:
         return fcf_direct
@@ -180,7 +184,7 @@ def free_cash_flow(cash: pd.DataFrame) -> Optional[pd.Series]:
     capex = _get(cash, "capex")
     if ocf is None or capex is None:
         return None
-    return ocf + capex
+    return ocf - capex.abs()
 
 
 def adjusted_fcf(cash: pd.DataFrame) -> Optional[pd.Series]:

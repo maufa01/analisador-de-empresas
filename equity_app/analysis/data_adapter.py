@@ -22,6 +22,7 @@ silenced.
 """
 from __future__ import annotations
 import os
+import re
 from dataclasses import dataclass
 from typing import Literal, Optional
 
@@ -686,16 +687,23 @@ def _info_from_fmp(ticker: str) -> ProviderResult:
             message="profile endpoint returned empty",
         )
 
-    # FMP's /profile ships the 52-week range as "low-high" string.
-    range_str = p.get("range") or ""
-    range_parts = [s.strip() for s in range_str.split("-")] if range_str else []
-    def _f(idx):
-        try:
-            return float(range_parts[idx]) if range_parts[idx] else None
-        except (ValueError, IndexError):
-            return None
-    w52_low = _f(0) if len(range_parts) >= 1 else None
-    w52_high = _f(-1) if len(range_parts) >= 2 else None
+    # FMP's /profile ships the 52-week range as a "low-high" string.
+    # Format varies: "90.93-161.34" (no spaces), "$90.93 - $161.34"
+    # (currency + spaces), "0.5234 - 1.45". Strip commas (thousands
+    # separators) then extract POSITIVE numeric tokens — the "-" in
+    # "90.93-161.34" is the separator, never a sign, so we don't allow
+    # leading "-" in the pattern.
+    range_str = (p.get("range") or "").replace(",", "")
+    nums = re.findall(r"\d+\.?\d*", range_str)
+    nums = [float(n) for n in nums if n]
+    nums = [n for n in nums if n > 0]  # 52W bounds are always positive
+    if len(nums) >= 2:
+        w52_low = min(nums)
+        w52_high = max(nums)
+    elif len(nums) == 1:
+        w52_low = w52_high = nums[0]
+    else:
+        w52_low = w52_high = None
 
     data = {
         "name":               p.get("companyName"),

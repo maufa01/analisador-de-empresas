@@ -113,6 +113,12 @@ def is_applicable(
     """
     DDM is meaningful when the most recent payout ratio is above ``min_payout``
     and dividends have been paid for at least 2 years.
+
+    Uses the MOST RECENT year's payout (not 3y avg) — averaging mutes
+    transitional cases like MU where dividends were re-initiated only
+    recently with a tiny payout. The 3y avg can stay >= min_payout
+    purely because of one historical year, and DDM ends up applied to
+    a company that's effectively not a meaningful dividend payer today.
     """
     div = _get(cash, "dividends_paid")
     if div is None:
@@ -120,8 +126,16 @@ def is_applicable(
     s = div.abs().dropna()
     if (s > 0).sum() < 2:
         return False
-    pr = _payout_ratio(income, cash)
-    return bool(pr is not None and pr >= min_payout)
+    ni = _get(income, "net_income")
+    if ni is None:
+        return False
+    df = pd.concat([div.abs(), ni], axis=1).dropna().tail(1)
+    if df.empty:
+        return False
+    div_last, ni_last = float(df.iloc[0, 0]), float(df.iloc[0, 1])
+    if ni_last <= 0:
+        return False
+    return (div_last / ni_last) >= min_payout
 
 
 def gordon(

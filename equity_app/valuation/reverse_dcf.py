@@ -61,19 +61,23 @@ def _interpret(
     if historical is None:
         return (f"Market expects ~{implied:.1%} stage-1 growth. "
                 "Insufficient history to compare with realised growth.")
+    # Evaluate by BOTH absolute gap (pp) and ratio. Ratio alone is
+    # misleading for low-growth bases: 17.3% vs 11.8% is ratio 1.47
+    # (looks "fair") but the +5.5pp absolute gap is material.
+    gap_pp = (implied - historical) * 100.0
     ratio = implied / historical if historical > 0 else float("inf")
-    if ratio > 2.0:
-        return (f"Market expects **{implied:.1%}** stage-1 growth — far "
-                f"above the historical {historical:.1%} CAGR (about "
-                f"{ratio:.1f}× higher). Pricing is **optimistic**; needs "
-                "a credible re-acceleration thesis.")
-    if ratio < 0.5:
-        return (f"Market expects only **{implied:.1%}** vs the historical "
-                f"{historical:.1%} CAGR. Pricing is **pessimistic** — "
-                "look for catalysts that could close the gap.")
-    base = (f"Market expectations align with realised growth "
-            f"({implied:.1%} implied vs {historical:.1%} historical). "
-            "Pricing looks fair on the growth dimension.")
+    if gap_pp >= 3.0 and ratio >= 1.3:
+        return (f"Market expects **{implied:.1%}** stage-1 growth — "
+                f"above the historical {historical:.1%} CAGR "
+                f"(+{gap_pp:.1f}pp). Pricing implies **acceleration**; "
+                "needs a credible thesis for the gap.")
+    if gap_pp <= -3.0 and ratio <= 0.7:
+        return (f"Market expects only **{implied:.1%}** vs the "
+                f"historical {historical:.1%} CAGR ({gap_pp:.1f}pp). "
+                "Pricing implies **deceleration** — look for catalysts.")
+    base = (f"Market expectations broadly align with realised growth "
+            f"({implied:.1%} implied vs {historical:.1%} historical, "
+            f"{gap_pp:+.1f}pp). Pricing looks fair on the growth dimension.")
     if industry is not None and abs(implied - industry) > 0.05:
         base += (f" Industry average growth is {industry:.1%} — "
                  f"{'above' if implied > industry else 'below'} sector trend.")

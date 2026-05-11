@@ -66,6 +66,14 @@ def _historical_growth_stats(
     g_mean = float(growth.mean())
     g_std = float(growth.std(ddof=1)) if len(growth) > 1 else 0.0
     g_std = max(g_std, MONTE_CARLO_DEFAULTS["rev_growth_std_floor"])
+    # Cyclical tickers (memory, oil, biotech) have FCF that crosses
+    # zero — pct_change() in those cases produces absurd means/std
+    # (e.g. div-by-near-zero yields 10x+ growth for one period).
+    # Hard caps keep the sim within a sane band.
+    g_mean = float(np.clip(g_mean, -0.30, 0.50))
+    g_std = float(np.clip(
+        g_std, MONTE_CARLO_DEFAULTS["rev_growth_std_floor"], 0.30,
+    ))
     return g_mean, g_std
 
 

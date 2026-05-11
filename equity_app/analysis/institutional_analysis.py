@@ -76,28 +76,52 @@ def _parse_pct(value) -> Optional[float]:
 
 def _parse_major_holders(raw) -> tuple[Optional[float], Optional[float]]:
     """
-    yfinance's ``major_holders`` ships a tiny DataFrame with rows like
-    ``("0.07%", "% of Shares Held by All Insider")``. Match by keyword.
+    Parse insider / institutional % from yfinance ``major_holders``.
+
+    Handles BOTH shapes yfinance has shipped over the years:
+    - New (>=0.2): DataFrame indexed by label ("insidersPercentHeld",
+      "institutionsPercentHeld", …) with a single value column, values
+      as decimals (e.g. 0.0046 → 0.46%).
+    - Old: DataFrame with two columns where each row is
+      ``("0.07%", "% of Shares Held by All Insider")``.
     """
     if raw is None or not isinstance(raw, pd.DataFrame) or raw.empty:
         return None, None
 
     insider_pct = None
     inst_pct = None
-    for _, row in raw.iterrows():
-        # Both columns can be either col 0 or col 1 depending on version
-        cells = [str(c) for c in row.tolist()]
-        joined = " ".join(cells).lower()
-        for cell in cells:
-            if re.match(r"^\s*[\d\.]+%?\s*$", str(cell)):
-                num = _parse_pct(cell)
-                if num is None:
-                    continue
-                if "insider" in joined:
-                    insider_pct = num
-                elif "institut" in joined:
-                    inst_pct = num
-                break
+
+    # ---- Schema nuevo: index=label, single column=value (decimal) ----
+    for idx_label, row in raw.iterrows():
+        lbl = str(idx_label).lower()
+        try:
+            val = float(row.iloc[0]) if len(row) > 0 else None
+        except (TypeError, ValueError):
+            val = None
+        if val is None or not math.isfinite(val):
+            continue
+        # yfinance ships decimals (0.0046) — bump to % when |val| < 1.5
+        val_pct = val * 100 if abs(val) < 1.5 else val
+        if "insider" in lbl and insider_pct is None:
+            insider_pct = val_pct
+        elif "institut" in lbl and "float" not in lbl and inst_pct is None:
+            inst_pct = val_pct
+
+    # ---- Schema viejo fallback: scan rows for "X%" + keyword cells ----
+    if insider_pct is None or inst_pct is None:
+        for _, row in raw.iterrows():
+            cells = [str(c) for c in row.tolist()]
+            joined = " ".join(cells).lower()
+            for cell in cells:
+                if re.match(r"^\s*[\d\.]+%?\s*$", str(cell)):
+                    num = _parse_pct(cell)
+                    if num is None:
+                        continue
+                    if "insider" in joined and insider_pct is None:
+                        insider_pct = num
+                    elif "institut" in joined and inst_pct is None:
+                        inst_pct = num
+                    break
     return insider_pct, inst_pct
 
 

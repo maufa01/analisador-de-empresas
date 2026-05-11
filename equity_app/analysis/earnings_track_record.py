@@ -57,17 +57,20 @@ def _coerce_history_df(raw) -> pd.DataFrame:
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
 
-    # Compute the surprise if yfinance didn't ship it
+    # Compute surprise + surprise_pct from raw inputs. We always
+    # recompute even when yfinance ships ``surprisePercent`` because
+    # the convention has drifted across yfinance versions (sometimes
+    # decimal 0.20, sometimes pct 20.0). Computing from eps_actual −
+    # eps_estimate guarantees one consistent unit (pct, e.g. 20.0).
     if "eps_actual" in df.columns and "eps_estimate" in df.columns:
         df["surprise"] = df["eps_actual"] - df["eps_estimate"]
         df["beat"] = df["eps_actual"] > df["eps_estimate"]
-        if "surprise_pct" not in df.columns:
-            df["surprise_pct"] = (
-                (df["eps_actual"] - df["eps_estimate"]).abs()
-                .where(df["eps_estimate"].abs() > 0)
-                / df["eps_estimate"].abs() * 100.0
-                * np.sign(df["eps_actual"] - df["eps_estimate"])
-            )
+        df["surprise_pct"] = (
+            (df["eps_actual"] - df["eps_estimate"]).abs()
+            .where(df["eps_estimate"].abs() > 0)
+            / df["eps_estimate"].abs() * 100.0
+            * np.sign(df["eps_actual"] - df["eps_estimate"])
+        )
     return df.sort_index(ascending=False)
 
 
@@ -180,13 +183,46 @@ def get_earnings_history(ticker: str) -> EarningsHistory:
     next_date = None
     eps_est = None
     rev_est = None
+
+    def _format_earnings_date(raw) -> Optional[str]:
+        """yfinance now ships Earnings Date as a list[datetime] (one or
+        two entries — typically [start, end] of the announcement window).
+        Pre-2024 it was a single date or a string. Normalise to an ISO
+        'YYYY-MM-DD' string so the UI can slice [:10] safely."""
+        if raw is None:
+            return None
+        # Unwrap a list/tuple to its first element
+        if isinstance(raw, (list, tuple)):
+            if not raw:
+                return None
+            raw = raw[0]
+        # pandas Timestamp / datetime / date → ISO
+        if hasattr(raw, "strftime"):
+            try:
+                return raw.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        # Numpy datetime64 / pandas NaT
+        try:
+            ts = pd.Timestamp(raw)
+            if pd.isna(ts):
+                return None
+            return ts.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+        # Fallback: stringify and slice — at least won't print "[datetime("
+        s = str(raw).strip()
+        return s[:10] if s else None
+
     try:
         cal = getattr(t, "calendar", None)
         if cal is not None:
             if hasattr(cal, "empty") and not cal.empty:
                 # DataFrame variant
                 if "Earnings Date" in cal.index:
-                    next_date = str(cal.loc["Earnings Date"].iloc[0])
+                    next_date = _format_earnings_date(
+                        cal.loc["Earnings Date"].iloc[0]
+                    )
                 if "Earnings Estimate" in cal.index:
                     val = cal.loc["Earnings Estimate"].iloc[0]
                     eps_est = float(val) if pd.notna(val) else None
@@ -194,7 +230,7 @@ def get_earnings_history(ticker: str) -> EarningsHistory:
                     val = cal.loc["Revenue Estimate"].iloc[0]
                     rev_est = float(val) if pd.notna(val) else None
             elif isinstance(cal, dict):
-                next_date = str(cal.get("Earnings Date", "")) or None
+                next_date = _format_earnings_date(cal.get("Earnings Date"))
                 eps_est = (float(cal["Earnings Estimate"])
                            if cal.get("Earnings Estimate") is not None else None)
                 rev_est = (float(cal["Revenue Estimate"])
