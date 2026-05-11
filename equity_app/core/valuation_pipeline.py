@@ -38,10 +38,16 @@ from valuation.ddm import (
     DDMResult,
 )
 from valuation.residual_income import run_residual_income, RIResult
+from valuation.epv import run_epv, EPVResult
+from valuation.multiples_valuation import (
+    run_multiples_valuation, MultiplesResult,
+)
 from valuation.valuation_aggregator import aggregate, AggregatedValuation
 from scoring.scorer import compute_score, ScoreBreakdown
 from scoring.rating import rate, Rating
-from analysis.industry_classifier import classify_industry
+from analysis.industry_classifier import (
+    classify_industry, classify_business_profile,
+)
 
 
 def _should_skip_fcff_dcf(
@@ -81,6 +87,11 @@ class ValuationResults:
     ddm_error: Optional[str] = None
     residual_income: Optional[RIResult] = None
     ri_error: Optional[str] = None
+    epv: Optional[EPVResult] = None
+    epv_error: Optional[str] = None
+    multiples: Optional[MultiplesResult] = None
+    multiples_error: Optional[str] = None
+    profile: str = "default"
 
     aggregator: AggregatedValuation = field(default=None)  # type: ignore[assignment]
     score: ScoreBreakdown = field(default=None)            # type: ignore[assignment]
@@ -242,6 +253,46 @@ def run_valuation(
     except (ValuationError, InsufficientDataError) as exc:
         out.ri_error = str(exc)
 
+    # ---- Business profile + shares (used by EPV / Multiples) ----
+    profile = classify_business_profile(ticker, sector)
+    out.profile = profile
+
+    shares: Optional[float] = None
+    try:
+        # Reuse the established alias path from dcf_three_stage so we
+        # don't reinvent the share-count resolution.
+        from valuation.dcf_three_stage import (
+            _shares_outstanding as _shares_resolver,
+        )
+        shares = _shares_resolver(income, balance)
+    except Exception:
+        shares = None
+
+    # ---- EPV ----
+    if shares and shares > 0:
+        try:
+            out.epv = run_epv(
+                income=income, balance=balance,
+                wacc=wacc_res.wacc,
+                shares_outstanding=shares,
+            )
+        except (ValuationError, InsufficientDataError) as exc:
+            out.epv_error = str(exc)
+    else:
+        out.epv_error = "Share count unavailable."
+
+    # ---- Multiples ----
+    if shares and shares > 0:
+        try:
+            out.multiples = run_multiples_valuation(
+                income=income, balance=balance, cash=cash,
+                sector=sector, shares_outstanding=shares,
+            )
+        except (ValuationError, InsufficientDataError) as exc:
+            out.multiples_error = str(exc)
+    else:
+        out.multiples_error = "Share count unavailable."
+
     # ---- Aggregator ----
     out.aggregator = aggregate(
         dcf=(out.dcf.intrinsic_value_per_share if out.dcf else None),
@@ -256,6 +307,11 @@ def run_valuation(
             out.residual_income.intrinsic_value_per_share
             if out.residual_income else None
         ),
+        epv=(out.epv.intrinsic_value_per_share if out.epv else None),
+        multiples=(out.multiples.implied_per_share_median
+                   if out.multiples else None),
+        profile=profile,
+        current_price=current_price,
         sector=sector,
     )
 

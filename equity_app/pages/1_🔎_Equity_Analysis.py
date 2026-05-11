@@ -659,6 +659,8 @@ sector_label = (live_info.get("sector")
                 or TICKER_META.get(active_ticker, {}).get("sector")
                 or "—")
 
+_agg = results.aggregator
+_have_agg = (_agg is not None and np.isfinite(_agg.intrinsic_per_share))
 render_ticker_header(
     ticker=active_ticker,
     company_name=company_name,
@@ -667,14 +669,16 @@ render_ticker_header(
     current_price=current_price,
     daily_change_pct=daily_change_pct,
     week52_low=w52_low, week52_high=w52_high,
-    intrinsic=(results.aggregator.intrinsic_per_share
-               if results.aggregator
-               and np.isfinite(results.aggregator.intrinsic_per_share)
-               else None),
+    intrinsic=(_agg.intrinsic_per_share if _have_agg else None),
     upside=upside,
     rating=results.rating,
-    confidence=(results.aggregator.confidence
-                if results.aggregator else None),
+    confidence=(_agg.confidence if _agg else None),
+    range_p25=(_agg.range_p25 if _have_agg
+               and np.isfinite(_agg.range_p25) else None),
+    range_p75=(_agg.range_p75 if _have_agg
+               and np.isfinite(_agg.range_p75) else None),
+    clipped_models=(list(_agg.clipped_models)
+                    if _agg and _agg.clipped_models else None),
 )
 
 # ---- Data-provenance strip — make it impossible to confuse fixture

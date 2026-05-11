@@ -113,3 +113,48 @@ def classify_industry(
         is_bank=is_bank, is_insurance=is_insurance, is_reit=is_reit,
         is_broker=is_broker, is_asset_manager=is_asset_manager,
     )
+
+
+# ============================================================
+# Business-profile classifier — used by the valuation aggregator to
+# pick the right weighted average across DCF / EPV / Multiples / etc.
+# ============================================================
+_GROWTH_TECH_KEYWORDS = ("technology", "communication", "information technology")
+_CYCLICAL_KEYWORDS = ("energy", "materials", "industrials",
+                       "consumer cyclical", "consumer discretionary",
+                       "basic materials")
+_DIVIDEND_PAYER_KEYWORDS = ("utilities",)
+_STEADY_KEYWORDS = ("consumer staples", "consumer defensive", "healthcare")
+
+
+def classify_business_profile(
+    ticker: str,
+    sector: Optional[str] = None,
+    industry: Optional[str] = None,
+) -> str:
+    """Return one of:
+       bank | insurance | reit | steady_compounder | growth_tech
+       | cyclical | dividend_payer | default
+
+    Financials override sector: a bank classified as "Financial Services"
+    still returns "bank" so the aggregator picks Residual-Income-heavy
+    weights instead of the DCF-heavy default.
+    """
+    cls = classify_industry(ticker, sector, industry)
+    if cls.is_bank:
+        return "bank"
+    if cls.is_insurance:
+        return "insurance"
+    if cls.is_reit:
+        return "reit"
+
+    s = (sector or "").lower()
+    if any(k in s for k in _GROWTH_TECH_KEYWORDS):
+        return "growth_tech"
+    if any(k in s for k in _DIVIDEND_PAYER_KEYWORDS):
+        return "dividend_payer"
+    if any(k in s for k in _STEADY_KEYWORDS):
+        return "steady_compounder"
+    if any(k in s for k in _CYCLICAL_KEYWORDS):
+        return "cyclical"
+    return "default"

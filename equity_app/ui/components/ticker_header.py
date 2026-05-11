@@ -50,6 +50,9 @@ def render_ticker_header(
     upside: Optional[float],
     rating: Optional[Rating] = None,
     confidence: Optional[str] = None,
+    range_p25: Optional[float] = None,
+    range_p75: Optional[float] = None,
+    clipped_models: Optional[list[str]] = None,
 ) -> None:
     """
     Render the big top-of-page header. Pass ``rating=None`` if the
@@ -111,22 +114,60 @@ def render_ticker_header(
                    if intrinsic is not None else "—"),
             delta=upside_delta,
         )
-        if rating is not None:
+
+        # Range subtitle (when aggregator provides p25-p75)
+        if (range_p25 is not None and range_p75 is not None
+                and range_p25 == range_p25 and range_p75 == range_p75):
+            st.markdown(
+                f'<div style="color:var(--text-muted); font-size:11px; '
+                f'margin-top:-6px; letter-spacing:0.4px;">'
+                f'RANGE  ${range_p25:,.0f} – ${range_p75:,.0f}</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Action label: price-vs-range when range is available, else the
+        # rating engine's verdict (back-compat for callers not passing
+        # a range yet).
+        verdict: Optional[str] = None
+        color: str = "var(--accent)"
+        if (current_price is not None and range_p25 is not None
+                and range_p75 is not None
+                and range_p25 == range_p25 and range_p75 == range_p75):
+            if current_price < range_p25:
+                verdict, color = "BUY", "var(--gains)"
+            elif current_price > range_p75:
+                verdict, color = "SELL", "var(--losses)"
+            else:
+                verdict, color = "FAIR VALUE", "var(--text-muted)"
+        elif rating is not None:
+            verdict = rating.verdict
             color = _VERDICT_COLOR.get(rating.verdict, "var(--accent)")
-            conf = (confidence or rating.confidence).upper()
+
+        if verdict is not None:
+            conf_raw = (confidence or (rating.confidence if rating else None) or "")
+            conf = conf_raw.upper() if isinstance(conf_raw, str) else ""
             conf_color = {
                 "HIGH":   "var(--gains)",
                 "MEDIUM": "var(--accent)",
                 "LOW":    "var(--losses)",
             }.get(conf, "var(--text-muted)")
+            conf_html = (
+                f'<span style="color:var(--text-muted); font-size:11px; '
+                f'letter-spacing:0.4px;">CONFIDENCE '
+                f'<b style="color:{conf_color};">{conf}</b></span>'
+            ) if conf else ""
             st.markdown(
                 f'<div style="display:flex; align-items:baseline; gap:10px; '
                 f'margin-top:-4px;">'
                 f'<span style="color:{color}; font-weight:500; '
-                f'font-size:18px; letter-spacing:0.3px;">{rating.verdict}</span>'
-                f'<span style="color:var(--text-muted); font-size:11px; '
-                f'letter-spacing:0.4px;">CONFIDENCE '
-                f'<b style="color:{conf_color};">{conf}</b></span>'
+                f'font-size:18px; letter-spacing:0.3px;">{verdict}</span>'
+                f'{conf_html}'
                 f'</div>',
                 unsafe_allow_html=True,
+            )
+
+        # Clipped-models caption — only when sanity clip excluded anything
+        if clipped_models:
+            st.caption(
+                f"Models excluded (>60% off price): {', '.join(clipped_models)}"
             )
