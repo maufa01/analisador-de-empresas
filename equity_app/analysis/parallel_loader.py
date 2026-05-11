@@ -22,6 +22,8 @@ from typing import Any, Optional
 import pandas as pd
 import streamlit as st
 
+from core.exceptions import ProviderError
+
 
 @dataclass
 class HydratedBundle:
@@ -115,23 +117,40 @@ CACHE_VERSION = 2
 def load_bundle(ticker: str) -> HydratedBundle:
     """Fetch everything for ``ticker`` in parallel and return one bundle.
 
-    Successful bundles are cached for 10 minutes per ticker. Failed
-    bundles (income empty, or info missing) are NOT cached — so the
-    user can retry without waiting for TTL expiry.
+    Successful bundles are cached for 10 minutes per ticker. Thin
+    bundles (FMP rate-limited / yfinance scrape blocked) raise
+    ProviderError from _load_bundle_cached so they are NOT cached by
+    @st.cache_data — the next call gets a fresh attempt.
     """
-    bundle = _load_bundle_cached(ticker, CACHE_VERSION)
-    # If the cached bundle is partial (FMP rate-limited / yfinance scrape
-    # blocked when this entry was first stored), invalidate the cache AND
-    # re-fetch in the same call so the caller doesn't render stale "—"s
-    # until the user's next interaction. The second fetch may itself fail
-    # (still rate-limited), in which case we return the partial bundle —
-    # downstream components already degrade gracefully.
-    if bundle.income.empty or not bundle.info:
+    try:
+        bundle = _load_bundle_cached(ticker, CACHE_VERSION)
+    except ProviderError:
+        # Thin bundle wasn't cached — return an empty shell so the UI
+        # can degrade gracefully (cards show "—") instead of crashing.
+        bundle = HydratedBundle(ticker=ticker)
+
+    # Stale criteria: only TRULY empty bundles (every provider failed)
+    # trigger an immediate re-fetch. A bundle with SEC financials but
+    # missing sector/price stays cached for the full TTL — accepting a
+    # short "—" period for those fields beats spamming fresh fetches
+    # while providers are rate-limited (every page nav would burn calls
+    # because clear() invalidates the cache for every ticker).
+    stale = (
+        bundle.income.empty
+        and not bundle.quote.get("price")
+        and not bundle.info.get("sector")
+    )
+    if stale:
         try:
             _load_bundle_cached.clear()
         except Exception:
             pass
-        bundle = _load_bundle_cached(ticker, CACHE_VERSION)
+        try:
+            bundle = _load_bundle_cached(ticker, CACHE_VERSION)
+        except ProviderError:
+            # Second attempt still thin — give up and return whatever
+            # the empty shell carries; downstream degrades gracefully.
+            pass
     return bundle
 
 
@@ -207,5 +226,20 @@ def _load_bundle_cached(ticker: str, _cache_version: int) -> HydratedBundle:
         "fmp_profile": "fmp" if bundle.fmp_profile else "—",
         "peers":       f"{len(bundle.peers)} resolved" if bundle.peers else "0",
     }
+
+    # Refuse to cache a TRULY empty bundle (every data source failed —
+    # SEC, FMP, yfinance, Finnhub all returned nothing). Raising here
+    # propagates out and @st.cache_data does NOT store the result, so
+    # the next call retries fresh. A bundle with SEC financials but
+    # missing sector/price is still useful for the Financials/Ratios
+    # tabs — keep it cached and let the broader stale check in
+    # load_bundle trigger a re-fetch on the next call.
+    if (bundle.income.empty
+            and not bundle.quote.get("price")
+            and not bundle.info.get("sector")):
+        raise ProviderError(
+            f"Bundle for {ticker} is fully empty (every provider "
+            "failed). Not caching — will retry on next call."
+        )
 
     return bundle
