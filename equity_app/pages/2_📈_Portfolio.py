@@ -81,18 +81,17 @@ st.caption(
 
 
 # ============================================================
-# Holdings input
+# Holdings input — 3 modes (Preset / Custom / Raw text)
 # ============================================================
-DEFAULT_HOLDINGS = "AAPL,100,150.0\nMSFT,50,300.0\nGOOG,20,140.0"
-holdings_input = st.text_area(
-    "Holdings (one per line: TICKER,SHARES,COST_BASIS)",
-    placeholder=DEFAULT_HOLDINGS,
-    height=140,
-    key="portfolio_holdings_input",
-)
+from ui.components.portfolio_input import render_portfolio_input
 
-if not holdings_input.strip():
-    st.info("Paste your holdings to begin (or use the placeholder format).")
+holdings_input = render_portfolio_input()
+
+if not holdings_input or not holdings_input.strip():
+    st.info(
+        "Choose a Preset, build a Custom portfolio, or paste Raw text "
+        "to begin."
+    )
     st.stop()
 
 
@@ -160,162 +159,174 @@ else:
     df["pl_$"] = float("nan")
     total_pl = 0.0
 
-
-# ============================================================
-# Summary cards
-# ============================================================
-c1, c2, c3 = st.columns(3)
-c1.metric("Total value",   f"${total_value:,.0f}")
-c2.metric("Positions",     len(holdings))
-c3.metric("Unrealized P/L", f"${total_pl:+,.0f}")
+# Expose total $ to session so Compare tab "Use this template" can
+# rebuild new-weight holdings against the real portfolio value.
+st.session_state["portfolio_total_value"] = total_value
 
 
 # ============================================================
-# Holdings table
-# ============================================================
-st.markdown(
-    '<div class="eq-section-label" style="margin-top:14px;">HOLDINGS</div>',
-    unsafe_allow_html=True,
-)
-display_df = df[["ticker", "shares", "cost", "price",
-                 "value", "weight_%", "pl_$"]].copy()
-display_df.columns = ["Ticker", "Shares", "Cost", "Price",
-                      "Value", "Weight %", "P/L $"]
-display_df = display_df.round(2)
-st.dataframe(display_df, hide_index=True, use_container_width=True)
-
-
-# ============================================================
-# Load bundles (sector + financials per ticker) + returns once
+# Load bundles + returns once (shared across tabs)
 # ============================================================
 tickers_tuple = tuple(sorted(h["ticker"] for h in holdings))
-# weight derived from value / total_value (raw holdings dict only has
-# value, not weight_% — that column lives on df, not the list).
 weights = {h["ticker"]: h["value"] / total_value for h in holdings}
 current_prices = {h["ticker"]: h["price"] for h in holdings}
 
-with st.spinner("Loading sector + fundamentals for each holding…"):
+with st.spinner("Loading sector + fundamentals…"):
     bundles = _bundles_for(tickers_tuple)
-
-# Build the holdings-meta dict used by sector + stress components
-holdings_meta = {}
-for h in holdings:
-    tkr = h["ticker"]
-    b = bundles.get(tkr)
-    sector = getattr(b, "sector", None) if b is not None else None
-    holdings_meta[tkr] = {
-        "weight": h["value"] / total_value,
-        "sector": sector,
-        "value":  h["value"],
-    }
-
-
-# ============================================================
-# Concentration · Sector breakdown · Quality screen
-# ============================================================
-st.markdown(
-    '<div class="eq-section-label" style="margin-top:18px;">CONCENTRATION</div>',
-    unsafe_allow_html=True,
-)
-render_concentration(weights)
-
-st.markdown(
-    '<div class="eq-section-label" style="margin-top:18px;">SECTOR BREAKDOWN</div>',
-    unsafe_allow_html=True,
-)
-render_sector_breakdown(holdings_meta)
-
-st.markdown(
-    '<div class="eq-section-label" style="margin-top:18px;">QUALITY SCREEN</div>',
-    unsafe_allow_html=True,
-)
-render_quality_screen(bundles, weights)
-
-
-# ============================================================
-# Correlation · Risk decomposition (need price history)
-# ============================================================
-with st.spinner("Pulling 3y price history for risk analytics…"):
+with st.spinner("Pulling 3y price history…"):
     returns = _portfolio_returns(tickers_tuple, period="3y")
 
-if not returns.empty and len(returns) >= 60:
+# holdings-meta used by sector + stress components
+holdings_meta = {
+    h["ticker"]: {
+        "weight": h["value"] / total_value,
+        "sector": getattr(bundles.get(h["ticker"]), "sector", None),
+        "value":  h["value"],
+    }
+    for h in holdings
+}
+
+
+# ============================================================
+# Headline KPI cards
+# ============================================================
+from ui.components.portfolio_markowitz import compute_strategy_metrics
+
+has_returns = (not returns.empty) and (len(returns) >= 60)
+if has_returns:
+    _metrics = compute_strategy_metrics(returns, weights)
+    exp_return = _metrics.get("expected_return")
+    vol = _metrics.get("volatility")
+    sharpe = _metrics.get("sharpe")
+else:
+    exp_return = vol = sharpe = None
+
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("TOTAL VALUE", f"${total_value:,.0f}",
+           f"${total_pl:+,.0f} P/L" if total_pl else None)
+k2.metric("EXPECTED RETURN",
+           f"{exp_return:.1%}" if exp_return is not None else "—",
+           help="Annualized from trailing 3y daily returns × current weights")
+k3.metric("VOLATILITY",
+           f"{vol:.1%}" if vol is not None else "—",
+           help="Annualized portfolio σ from cov matrix")
+k4.metric("SHARPE",
+           f"{sharpe:.2f}" if sharpe is not None else "—",
+           help="Expected return / volatility (rf=0)")
+st.caption(
+    "Trailing 3y daily returns. Sharpe assumes zero risk-free rate "
+    "for comparability across regimes."
+)
+
+
+# ============================================================
+# Tabs
+# ============================================================
+tab_comp, tab_risk, tab_quality, tab_stress, tab_frontier, tab_compare = st.tabs([
+    "Composition", "Risk", "Quality", "Stress",
+    "Frontier", "Compare strategies",
+])
+
+with tab_comp:
     st.markdown(
-        '<div class="eq-section-label" style="margin-top:18px;">CORRELATION</div>',
+        '<div class="eq-section-label">HOLDINGS</div>',
         unsafe_allow_html=True,
     )
-    render_correlation_heatmap(returns)
+    display_df = df[["ticker", "shares", "cost", "price",
+                     "value", "weight_%", "pl_$"]].copy()
+    display_df.columns = ["Ticker", "Shares", "Cost", "Price",
+                           "Value", "Weight %", "P/L $"]
+    st.dataframe(display_df.round(2), hide_index=True,
+                  use_container_width=True)
 
     st.markdown(
         '<div class="eq-section-label" style="margin-top:18px;">'
-        'RISK DECOMPOSITION</div>',
+        'CONCENTRATION</div>',
         unsafe_allow_html=True,
     )
-    render_risk_decomposition(returns, weights)
-else:
-    st.info(
-        "Correlation + risk decomposition need ≥60 days of overlapping "
-        "price history. Skipped (insufficient data for current holdings)."
+    render_concentration(weights)
+
+    st.markdown(
+        '<div class="eq-section-label" style="margin-top:18px;">'
+        'SECTOR BREAKDOWN</div>',
+        unsafe_allow_html=True,
     )
+    render_sector_breakdown(holdings_meta)
 
+with tab_risk:
+    if has_returns:
+        st.markdown(
+            '<div class="eq-section-label">CORRELATION</div>',
+            unsafe_allow_html=True,
+        )
+        render_correlation_heatmap(returns)
 
-# ============================================================
-# Stress tests (5 scenarios — replaces old single-slider stress)
-# ============================================================
-st.markdown(
-    '<div class="eq-section-label" style="margin-top:18px;">STRESS TESTS</div>',
-    unsafe_allow_html=True,
-)
-render_stress_tests(holdings_meta, current_prices)
+        st.markdown(
+            '<div class="eq-section-label" style="margin-top:18px;">'
+            'RISK DECOMPOSITION</div>',
+            unsafe_allow_html=True,
+        )
+        render_risk_decomposition(returns, weights)
 
+        # ---- Historical Value at Risk · 1-day · 95% ----
+        st.markdown(
+            '<div class="eq-section-label" style="margin-top:18px;">'
+            'VALUE AT RISK · 1-DAY · 95%</div>',
+            unsafe_allow_html=True,
+        )
+        try:
+            from portfolio.var_calculator import value_at_risk, conditional_var
+        except Exception as exc:
+            st.caption(f"VaR unavailable: {exc}")
+        else:
+            # Reuse the already-fetched 3y returns; build weighted portfolio
+            # return series in-place.
+            try:
+                w_series = pd.Series(weights).reindex(returns.columns).fillna(0.0)
+                portfolio_returns = (returns * w_series).sum(axis=1).dropna()
+                if len(portfolio_returns) < 60:
+                    st.caption("Not enough observations for VaR (need ≥60).")
+                else:
+                    var_pct = value_at_risk(portfolio_returns,
+                                             confidence=0.95,
+                                             method="historical", signed=True)
+                    cvar_pct = conditional_var(portfolio_returns,
+                                                confidence=0.95, signed=True)
+                    var_dollar = float(var_pct) * total_value
+                    cvar_dollar = float(cvar_pct) * total_value
+                    v1, v2 = st.columns(2)
+                    v1.metric("VaR (1d, 95%)",
+                              f"${abs(var_dollar):,.0f}",
+                              f"{var_pct*100:+.2f}% of portfolio")
+                    v2.metric("CVaR (Expected Shortfall)",
+                              f"${abs(cvar_dollar):,.0f}",
+                              f"{cvar_pct*100:+.2f}% avg in tail")
+                    st.caption(
+                        f"Historical method · {len(portfolio_returns)} obs "
+                        "of weighted-portfolio returns · 95% confidence."
+                    )
+            except Exception as exc:
+                st.caption(f"VaR computation failed: {exc}")
+    else:
+        st.info("Risk analytics need ≥60 days of overlapping price history.")
 
-# ============================================================
-# Markowitz frontier — educational, behind expander
-# ============================================================
-with st.expander("Markowitz frontier (educational)"):
-    if not returns.empty and len(returns) >= 60:
+with tab_quality:
+    render_quality_screen(bundles, weights)
+
+with tab_stress:
+    render_stress_tests(holdings_meta, current_prices)
+
+with tab_frontier:
+    if has_returns:
         render_markowitz_frontier(returns, weights)
     else:
-        st.info("Markowitz needs ≥60 days of returns history.")
+        st.info("Markowitz frontier needs ≥60 days of returns history.")
 
-
-# ============================================================
-# Historical VaR (optional, expander)
-# ============================================================
-with st.expander("📊 Value at Risk · 1-day · 95%"):
-    try:
-        import yfinance as yf
-        from portfolio.var_calculator import value_at_risk, conditional_var
-    except Exception as exc:
-        st.caption(f"VaR unavailable: {exc}")
+with tab_compare:
+    from ui.components.portfolio_strategy_compare import render_strategy_compare
+    if has_returns:
+        render_strategy_compare(returns, weights, current_prices)
     else:
-        tickers = [h["ticker"] for h in holdings]
-        weights = pd.Series({h["ticker"]: h["value"] / total_value
-                             for h in holdings})
-        try:
-            with st.spinner("Pulling 2y history for VaR…"):
-                prices = yf.download(tickers, period="2y",
-                                     progress=False, auto_adjust=True)
-                prices = prices["Close"] if isinstance(prices.columns, pd.MultiIndex) else prices
-                if isinstance(prices, pd.Series):
-                    prices = prices.to_frame(name=tickers[0])
-                returns = prices.pct_change().dropna(how="all")
-                portfolio_returns = (returns * weights).sum(axis=1).dropna()
-            var_pct = value_at_risk(portfolio_returns, confidence=0.95,
-                                     method="historical", signed=True)
-            cvar_pct = conditional_var(portfolio_returns, confidence=0.95,
-                                        signed=True)
-            var_dollar = float(var_pct) * total_value
-            cvar_dollar = float(cvar_pct) * total_value
-            v1, v2 = st.columns(2)
-            v1.metric("VaR (1d, 95%)",
-                      f"${abs(var_dollar):,.0f}",
-                      f"{var_pct*100:+.2f}% of portfolio")
-            v2.metric("CVaR (Expected Shortfall)",
-                      f"${abs(cvar_dollar):,.0f}",
-                      f"{cvar_pct*100:+.2f}% avg in tail")
-            st.caption(
-                f"Historical method · {len(portfolio_returns)} obs of "
-                "weighted-portfolio returns · 95% confidence."
-            )
-        except Exception as exc:
-            st.caption(f"VaR computation failed: {exc}")
+        st.info("Strategy comparison requires ≥60 days of price history.")
+
+

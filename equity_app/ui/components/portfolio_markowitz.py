@@ -8,6 +8,7 @@ solutions in small portfolios.
 from __future__ import annotations
 from typing import Optional
 import logging
+import math
 
 import numpy as np
 import pandas as pd
@@ -97,6 +98,86 @@ def _risk_parity(cov: np.ndarray, *, max_iter: int = 500,
     except Exception as e:
         log.warning("Risk-parity failed: %s", e)
         return None
+
+
+# ============================================================
+# Public helpers — reusable by other components (Compare tab, KPI cards)
+# ============================================================
+def compute_strategy_weights(
+    returns: pd.DataFrame,
+    current_weights: dict[str, float],
+) -> dict[str, Optional[dict[str, float]]]:
+    """Return {strategy_name: {ticker: weight} | None}. None means the
+    optimisation failed to converge — caller decides how to render
+    (skip column, show '—', etc.)."""
+    if returns is None or returns.empty or not current_weights:
+        return {}
+    tickers = [t for t in current_weights if t in returns.columns]
+    if len(tickers) < 2:
+        return {}
+    rets = returns[tickers].dropna(how="any")
+    if len(rets) < 60:
+        return {}
+
+    mu = (rets.mean() * 252.0).values
+    cov = (rets.cov() * 252.0).values
+
+    raw = np.array([current_weights[t] for t in tickers], dtype=float)
+    w_current = (raw / raw.sum()) if raw.sum() > 0 else np.full(len(tickers), 1 / len(tickers))
+    n = len(tickers)
+    w_eq = np.full(n, 1.0 / n)
+    w_minv = _min_variance(mu, cov)
+    w_maxs = _max_sharpe(mu, cov)
+    w_rp = _risk_parity(cov)
+
+    def _to_dict(arr: Optional[np.ndarray]) -> Optional[dict[str, float]]:
+        if arr is None:
+            return None
+        return {tickers[i]: float(arr[i]) for i in range(len(tickers))}
+
+    return {
+        "Current":      _to_dict(w_current),
+        "Min Variance": _to_dict(w_minv),
+        "Max Sharpe":   _to_dict(w_maxs),
+        "Risk Parity":  _to_dict(w_rp),
+        "Equal Weight": _to_dict(w_eq),
+    }
+
+
+def compute_strategy_metrics(
+    returns: pd.DataFrame,
+    weights: dict[str, float],
+) -> dict[str, float]:
+    """Annualised expected_return, volatility, sharpe, max_weight, eff_n
+    for a given (returns, weights) pair. Empty dict on degenerate input."""
+    if returns is None or returns.empty or not weights:
+        return {}
+    tickers = [t for t in weights if t in returns.columns]
+    if not tickers:
+        return {}
+    rets = returns[tickers].dropna(how="any")
+    if rets.empty:
+        return {}
+    w = np.array([weights[t] for t in tickers], dtype=float)
+    if w.sum() <= 0:
+        return {}
+    w = w / w.sum()
+    mu = (rets.mean() * 252.0).values
+    cov = (rets.cov() * 252.0).values
+    exp_ret = float(w @ mu)
+    var = float(w @ cov @ w)
+    vol = math.sqrt(max(var, 0.0))
+    sharpe = (exp_ret / vol) if vol > 0 else 0.0
+    max_w = float(max(w))
+    hhi = float(np.sum(w * w))
+    eff_n = (1.0 / hhi) if hhi > 0 else float("nan")
+    return {
+        "expected_return": exp_ret,
+        "volatility":      vol,
+        "sharpe":          sharpe,
+        "max_weight":      max_w,
+        "eff_n":           eff_n,
+    }
 
 
 # ============================================================
