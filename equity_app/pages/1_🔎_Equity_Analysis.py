@@ -51,7 +51,15 @@ from valuation.comparables import PeerSnapshot, comparables_table
 _FINANCIALS_YEARS = 5
 
 def _dedup_and_cap_years(df: pd.DataFrame, years: int = _FINANCIALS_YEARS) -> pd.DataFrame:
-    """Sort ascending, keep latest filing per fiscal year, return last N years."""
+    """Sort ascending, dedup by fiscal year, return last N years.
+
+    For each year, keep the row with the most non-null fields — that's
+    typically the actual 10-K filing as opposed to mid-quarter
+    comparative data (mostly-NaN) that SEC ships alongside subsequent
+    filings (e.g. MU FY2022 has both 2022-09-01 with real data and
+    2022-12-01/2023-03-02/2023-06-01 with NaN; the old keep="last"
+    logic kept the NaN row).
+    """
     if df is None or df.empty or years <= 0:
         return df
     idx = pd.to_datetime(df.index, errors="coerce")
@@ -60,8 +68,10 @@ def _dedup_and_cap_years(df: pd.DataFrame, years: int = _FINANCIALS_YEARS) -> pd
     df = df.copy()
     df.index = idx
     df = df.sort_index()
-    keep_mask = ~pd.Series(df.index.year, index=df.index).duplicated(keep="last").values
-    df = df.iloc[keep_mask]
+    non_null = df.notna().sum(axis=1)
+    years_idx = pd.Series(df.index.year, index=df.index)
+    keep_idx = non_null.groupby(years_idx).idxmax()
+    df = df.loc[keep_idx].sort_index()
     return df.tail(years)
 from valuation.dcf_three_stage import sensitivity_table
 from ui.charts.margins_evolution import build_margins_figure

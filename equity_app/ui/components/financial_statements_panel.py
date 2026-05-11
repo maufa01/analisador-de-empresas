@@ -63,13 +63,21 @@ def _color_for_value(val, view: str) -> str:
 
 
 def _cap_to_recent_years(df: pd.DataFrame, years: int) -> pd.DataFrame:
-    """Deduplica columnas por año fiscal (keep latest period per year)
-    y devuelve los últimos N años ordenados ascendente.
+    """Deduplica columnas por año fiscal y devuelve los últimos N años
+    ordenados ascendente.
 
     Why: SEC EDGAR + yfinance + FMP combined puede tener múltiples
-    period_end dentro del mismo fiscal year (Apple FY 2008 históricamente
-    aparece 4+ veces por variaciones de filing). Sin dedup se ven columnas
-    duplicadas tipo FY 2008 x4 en la UI.
+    period_end dentro del mismo fiscal year. Casos típicos:
+    - AAPL FY2008 históricamente aparece 4+ veces por variaciones de
+      filing — columnas duplicadas tipo FY 2008 x4.
+    - MU FY ends en septiembre y SEC ships 2022-09-01 (10-K real) +
+      2022-12-01 / 2023-03-02 / 2023-06-01 como comparative data en
+      filings posteriores; esos rows tienen mostly-NaN y antes
+      pisaban al 10-K real cuando se hacía `keep="last"` por año.
+
+    Estrategia: para cada año, quedarse con el row que tiene MÁS
+    campos no-null (típicamente el 10-K real vs comparative). Empate
+    → último por fecha.
     """
     if df is None or df.empty or years <= 0:
         return df
@@ -82,8 +90,21 @@ def _cap_to_recent_years(df: pd.DataFrame, years: int) -> pd.DataFrame:
     order = cols.argsort()
     df_sorted = df.iloc[:, order]
     cols_sorted = cols[order]
-    keep_mask = ~pd.Series(cols_sorted.year).duplicated(keep="last").values
-    df_dedup = df_sorted.iloc[:, keep_mask]
+    # Non-null count per column. Period is in columns (df is transposed),
+    # so .notna().sum(axis=0) counts populated fields per period.
+    non_null = df_sorted.notna().sum(axis=0)
+    years_idx = pd.Series(cols_sorted.year, index=range(len(cols_sorted)))
+    # For each year, keep the column-position with the max non-null
+    # count. groupby preserves order so ties resolve to the last one
+    # (which is the most recent date — same as old behaviour for
+    # well-behaved single-row years like AAPL/MSFT).
+    keep_positions = (
+        non_null.reset_index(drop=True)
+        .groupby(years_idx)
+        .idxmax()
+        .values
+    )
+    df_dedup = df_sorted.iloc[:, sorted(keep_positions)]
     return df_dedup.iloc[:, -years:]
 
 

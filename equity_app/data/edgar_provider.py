@@ -250,6 +250,7 @@ _GAAP_ALIASES: dict[str, list[str]] = {
     "investing_cash_flow":   ["NetCashProvidedByUsedInInvestingActivities"],
     "financing_cash_flow":   ["NetCashProvidedByUsedInFinancingActivities"],
     "capex":                 ["PaymentsToAcquirePropertyPlantAndEquipment",
+                              "PaymentsToAcquireProductiveAssets",
                               "PaymentsForCapitalImprovements"],
     "depreciation":          ["DepreciationDepletionAndAmortization", "Depreciation",
                               "DepreciationAndAmortization"],
