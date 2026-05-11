@@ -1830,6 +1830,9 @@ def _charts_tab_fragment(inc, bal, cf, *, wacc=None, peers=None):
     from ui.charts.debt_evolution import build_debt_evolution
     from ui.charts.capital_allocation_stacked import build_capital_allocation_chart
     from ui.charts.owner_earnings import build_owner_earnings_chart
+    from ui.charts.cash_conversion import build_cash_conversion
+    from ui.charts.reinvestment_rate import build_reinvestment_rate
+    from ui.charts.share_count_eps import build_share_count_eps
     from ui.charts.cash_conversion_cycle import (
         build_ccc_chart, build_ccc_breakdown_table,
     )
@@ -1889,6 +1892,36 @@ def _charts_tab_fragment(inc, bal, cf, *, wacc=None, peers=None):
     )
     st.plotly_chart(
         build_owner_earnings_chart(inc, bal, cf, height=360),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+
+    st.markdown(
+        '<div class="eq-section-label" style="margin-top:18px;">'
+        'CASH CONVERSION · FCF / NET INCOME</div>',
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(
+        build_cash_conversion(inc, cf, height=320),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+
+    st.markdown(
+        '<div class="eq-section-label" style="margin-top:18px;">'
+        'REINVESTMENT RATE · CAPEX / REVENUE</div>',
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(
+        build_reinvestment_rate(inc, cf, height=320),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+
+    st.markdown(
+        '<div class="eq-section-label" style="margin-top:18px;">'
+        'SHARE COUNT &amp; EPS · DILUTED</div>',
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(
+        build_share_count_eps(inc, height=320),
         use_container_width=True, config={"displayModeBar": False},
     )
 
