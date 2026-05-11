@@ -120,14 +120,18 @@ def load_bundle(ticker: str) -> HydratedBundle:
     user can retry without waiting for TTL expiry.
     """
     bundle = _load_bundle_cached(ticker, CACHE_VERSION)
-    # If the cached bundle is partial (financials or info failed), force
-    # a fresh fetch on the next call by clearing this entry. The retry
-    # itself happens on the user's next interaction.
+    # If the cached bundle is partial (FMP rate-limited / yfinance scrape
+    # blocked when this entry was first stored), invalidate the cache AND
+    # re-fetch in the same call so the caller doesn't render stale "—"s
+    # until the user's next interaction. The second fetch may itself fail
+    # (still rate-limited), in which case we return the partial bundle —
+    # downstream components already degrade gracefully.
     if bundle.income.empty or not bundle.info:
         try:
             _load_bundle_cached.clear()
         except Exception:
             pass
+        bundle = _load_bundle_cached(ticker, CACHE_VERSION)
     return bundle
 
 

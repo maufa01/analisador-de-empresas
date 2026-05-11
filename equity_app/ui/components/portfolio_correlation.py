@@ -47,6 +47,17 @@ def render_correlation_heatmap(returns: pd.DataFrame) -> None:
     order = _cluster_order(corr)
     corr = corr.loc[order, order]
 
+    # App-aligned diverging palette: teal (negative corr — assets move
+    # opposite) → dark surface (zero) → coral (high positive corr —
+    # functionally one position). Stops on the −1..+1 axis.
+    app_colorscale = [
+        [0.00, "#2EC4B6"],   # −1.0 teal (COLOR_GROWTH)
+        [0.25, "#1F7A6F"],   # −0.5 darker teal
+        [0.50, "#131826"],   # 0.0 dark surface (matches app bg)
+        [0.75, "#8B5C2C"],   # +0.5 muted copper
+        [1.00, "#E63946"],   # +1.0 coral (COLOR_NEGATIVE)
+    ]
+
     # Plotly heatmap with diverging palette
     z = corr.values
     text = [[f"{z[i, j]:.2f}" for j in range(z.shape[1])]
@@ -54,9 +65,9 @@ def render_correlation_heatmap(returns: pd.DataFrame) -> None:
     fig = go.Figure(go.Heatmap(
         z=z, x=order, y=order,
         zmin=-1, zmax=1,
-        colorscale="RdBu_r", reversescale=False,
+        colorscale=app_colorscale, reversescale=False,
         text=text, texttemplate="%{text}",
-        textfont=dict(size=10, color="rgba(255,255,255,0.85)"),
+        textfont=dict(size=10, color="rgba(255,255,255,0.95)"),
         hovertemplate="<b>%{x}</b> ↔ <b>%{y}</b>: %{z:.2f}<extra></extra>",
         colorbar=dict(
             thickness=10, len=0.8,
