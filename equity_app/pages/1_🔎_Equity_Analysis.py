@@ -1833,6 +1833,7 @@ def _charts_tab_fragment(inc, bal, cf, *, wacc=None, peers=None):
     from ui.charts.cash_conversion import build_cash_conversion
     from ui.charts.reinvestment_rate import build_reinvestment_rate
     from ui.charts.share_count_eps import build_share_count_eps
+    from ui.charts.dupont_decomposition import build_dupont
     from ui.charts.cash_conversion_cycle import (
         build_ccc_chart, build_ccc_breakdown_table,
     )
@@ -1922,6 +1923,16 @@ def _charts_tab_fragment(inc, bal, cf, *, wacc=None, peers=None):
     )
     st.plotly_chart(
         build_share_count_eps(inc, height=320),
+        use_container_width=True, config={"displayModeBar": False},
+    )
+
+    st.markdown(
+        '<div class="eq-section-label" style="margin-top:18px;">'
+        'DUPONT DECOMPOSITION · ROE = NM × AT × EM</div>',
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(
+        build_dupont(inc, bal, height=360),
         use_container_width=True, config={"displayModeBar": False},
     )
 
