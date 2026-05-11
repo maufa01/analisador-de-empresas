@@ -73,14 +73,21 @@ class _StdlibTokenBucket:
 
 
 def make_limiter(calls: int, per_seconds: int = 60):
-    """Return a token-bucket limiter (pyrate-limiter when available)."""
+    """Return a token-bucket limiter (pyrate-limiter when available).
+
+    Falls back to the stdlib bucket if pyrate-limiter is missing OR if
+    its constructor signature has changed (v4 dropped ``raise_when_fail``
+    and ``max_delay``, v5+ may break further). We deliberately avoid the
+    removed kwargs — older versions accept the bare ``Rate`` positional.
+    """
     try:
         from pyrate_limiter import Duration, Rate, Limiter  # type: ignore
 
         rate = Rate(calls, Duration.SECOND * per_seconds)
-        return Limiter(rate, raise_when_fail=False, max_delay=60_000)
-    except ImportError:
-        log.info("pyrate_limiter_missing_using_stdlib", calls=calls, per=per_seconds)
+        return Limiter(rate)
+    except (ImportError, TypeError, AttributeError) as exc:
+        log.info("pyrate_limiter_unavailable_using_stdlib",
+                 calls=calls, per=per_seconds, error=str(exc))
         return _StdlibTokenBucket(calls, per_seconds)
 
 
