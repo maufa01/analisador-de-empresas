@@ -27,6 +27,44 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from ui.components.portfolio_concentration import render_concentration
+from ui.components.portfolio_sector_breakdown import render_sector_breakdown
+from ui.components.portfolio_quality_screen import render_quality_screen
+from ui.components.portfolio_correlation import render_correlation_heatmap
+from ui.components.portfolio_risk_decomposition import render_risk_decomposition
+from ui.components.portfolio_stress_tests import render_stress_tests
+from ui.components.portfolio_markowitz import render_markowitz_frontier
+
+
+@st.cache_data(ttl=21_600, show_spinner=False)
+def _portfolio_returns(tickers: tuple[str, ...], period: str = "3y") -> pd.DataFrame:
+    """Daily returns DataFrame (rows=dates, cols=tickers), cached 6h."""
+    try:
+        import yfinance as yf
+    except Exception:
+        return pd.DataFrame()
+    try:
+        df = yf.download(list(tickers), period=period,
+                         auto_adjust=True, progress=False)["Close"]
+        if isinstance(df, pd.Series):
+            df = df.to_frame(name=tickers[0])
+        return df.pct_change().dropna(how="all")
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=21_600, show_spinner=False)
+def _bundles_for(tickers: tuple[str, ...]) -> dict:
+    """Cached load_bundle per ticker — used by sector + quality components."""
+    from analysis.parallel_loader import load_bundle
+    out = {}
+    for t in tickers:
+        try:
+            out[t] = load_bundle(t)
+        except Exception:
+            out[t] = None
+    return out
+
 
 # ============================================================
 # Header
@@ -148,25 +186,96 @@ st.dataframe(display_df, hide_index=True, use_container_width=True)
 
 
 # ============================================================
-# Stress slider
+# Load bundles (sector + financials per ticker) + returns once
+# ============================================================
+tickers_tuple = tuple(sorted(h["ticker"] for h in holdings))
+# weight derived from value / total_value (raw holdings dict only has
+# value, not weight_% — that column lives on df, not the list).
+weights = {h["ticker"]: h["value"] / total_value for h in holdings}
+current_prices = {h["ticker"]: h["price"] for h in holdings}
+
+with st.spinner("Loading sector + fundamentals for each holding…"):
+    bundles = _bundles_for(tickers_tuple)
+
+# Build the holdings-meta dict used by sector + stress components
+holdings_meta = {}
+for h in holdings:
+    tkr = h["ticker"]
+    b = bundles.get(tkr)
+    sector = getattr(b, "sector", None) if b is not None else None
+    holdings_meta[tkr] = {
+        "weight": h["value"] / total_value,
+        "sector": sector,
+        "value":  h["value"],
+    }
+
+
+# ============================================================
+# Concentration · Sector breakdown · Quality screen
 # ============================================================
 st.markdown(
-    '<div class="eq-section-label" style="margin-top:18px;">'
-    'MARKET-SHOCK STRESS</div>',
+    '<div class="eq-section-label" style="margin-top:18px;">CONCENTRATION</div>',
     unsafe_allow_html=True,
 )
-shock = st.slider(
-    "Market shock", min_value=-50, max_value=30, value=-30, step=5,
-    format="%+d%%",
-    help="Apply a flat shock across all holdings — first-order estimate "
-         "of dollar exposure.",
+render_concentration(weights)
+
+st.markdown(
+    '<div class="eq-section-label" style="margin-top:18px;">SECTOR BREAKDOWN</div>',
+    unsafe_allow_html=True,
 )
-shock_pct = shock / 100.0
-new_total = total_value * (1.0 + shock_pct)
-delta = new_total - total_value
-sc1, sc2 = st.columns(2)
-sc1.metric("After shock", f"${new_total:,.0f}", f"{shock:+d}%")
-sc2.metric("Dollar change", f"${delta:+,.0f}")
+render_sector_breakdown(holdings_meta)
+
+st.markdown(
+    '<div class="eq-section-label" style="margin-top:18px;">QUALITY SCREEN</div>',
+    unsafe_allow_html=True,
+)
+render_quality_screen(bundles, weights)
+
+
+# ============================================================
+# Correlation · Risk decomposition (need price history)
+# ============================================================
+with st.spinner("Pulling 3y price history for risk analytics…"):
+    returns = _portfolio_returns(tickers_tuple, period="3y")
+
+if not returns.empty and len(returns) >= 60:
+    st.markdown(
+        '<div class="eq-section-label" style="margin-top:18px;">CORRELATION</div>',
+        unsafe_allow_html=True,
+    )
+    render_correlation_heatmap(returns)
+
+    st.markdown(
+        '<div class="eq-section-label" style="margin-top:18px;">'
+        'RISK DECOMPOSITION</div>',
+        unsafe_allow_html=True,
+    )
+    render_risk_decomposition(returns, weights)
+else:
+    st.info(
+        "Correlation + risk decomposition need ≥60 days of overlapping "
+        "price history. Skipped (insufficient data for current holdings)."
+    )
+
+
+# ============================================================
+# Stress tests (5 scenarios — replaces old single-slider stress)
+# ============================================================
+st.markdown(
+    '<div class="eq-section-label" style="margin-top:18px;">STRESS TESTS</div>',
+    unsafe_allow_html=True,
+)
+render_stress_tests(holdings_meta, current_prices)
+
+
+# ============================================================
+# Markowitz frontier — educational, behind expander
+# ============================================================
+with st.expander("Markowitz frontier (educational)"):
+    if not returns.empty and len(returns) >= 60:
+        render_markowitz_frontier(returns, weights)
+    else:
+        st.info("Markowitz needs ≥60 days of returns history.")
 
 
 # ============================================================
@@ -180,7 +289,7 @@ with st.expander("📊 Value at Risk · 1-day · 95%"):
         st.caption(f"VaR unavailable: {exc}")
     else:
         tickers = [h["ticker"] for h in holdings]
-        weights = pd.Series({h["ticker"]: h["weight_%"] / 100.0
+        weights = pd.Series({h["ticker"]: h["value"] / total_value
                              for h in holdings})
         try:
             with st.spinner("Pulling 2y history for VaR…"):
