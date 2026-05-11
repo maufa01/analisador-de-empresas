@@ -1,5 +1,6 @@
 """Margin evolution — Gross / Operating / Net (drop EBITDA, less noisy)."""
 from __future__ import annotations
+from typing import Optional, Sequence
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -7,8 +8,25 @@ import plotly.graph_objects as go
 from analysis.ratios import calculate_ratios
 from ui.charts import (
     CHART_HEIGHT, COLOR_GROWTH, COLOR_NEUTRAL, COLOR_PRIMARY,
-    _annotate_last, _base_layout, _empty_layout, _fy_labels,
+    COLOR_REFERENCE, COLOR_TEXT_MUTED, _annotate_last, _base_layout,
+    _empty_layout, _fy_labels,
 )
+
+
+def _peer_median_net_margin(peers: Sequence) -> Optional[float]:
+    """Median net margin (%) across peer snapshots. Uses fields populated
+    by `_hydrate_one`; returns None if no peer has both NI and revenue."""
+    margins: list[float] = []
+    for p in peers or []:
+        ni = getattr(p, "net_income", None)
+        rev = getattr(p, "revenue", None)
+        if ni is not None and rev and rev > 0:
+            margins.append(float(ni) / float(rev) * 100.0)
+    if not margins:
+        return None
+    margins.sort()
+    n = len(margins)
+    return margins[n // 2] if n % 2 == 1 else 0.5 * (margins[n // 2 - 1] + margins[n // 2])
 
 
 # Three colors only — the spec asks to drop EBITDA margin to keep the
@@ -26,6 +44,7 @@ def build_margins_figure(
     cash: pd.DataFrame,
     *,
     height: int = CHART_HEIGHT,
+    peers: Optional[Sequence] = None,
 ) -> go.Figure:
     fig = go.Figure()
     if income is None or income.empty:
@@ -66,4 +85,16 @@ def build_margins_figure(
         return fig
 
     fig.update_layout(**_base_layout(height=height, y_ticksuffix="%"))
+
+    # Peer median net margin — dashed reference. Lets the user see if
+    # the target's net margin tracks above / below peer baseline.
+    peer_med = _peer_median_net_margin(peers) if peers else None
+    if peer_med is not None:
+        fig.add_hline(
+            y=peer_med, line_dash="dash", line_color=COLOR_REFERENCE,
+            opacity=0.7,
+            annotation_text=f"Peer median Net {peer_med:.1f}%",
+            annotation_position="bottom right",
+            annotation_font=dict(size=9, color=COLOR_TEXT_MUTED),
+        )
     return fig

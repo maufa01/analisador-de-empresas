@@ -1818,9 +1818,14 @@ with tab_insiders:
 
 # ---- Charts ----
 @st.fragment
-def _charts_tab_fragment(inc, bal, cf):
+def _charts_tab_fragment(inc, bal, cf, *, wacc=None, peers=None):
     """Charts tab is the heaviest renderer — 6+ Plotly figures. Wrapped
-    in @st.fragment so it doesn't re-execute when sliders elsewhere move."""
+    in @st.fragment so it doesn't re-execute when sliders elsewhere move.
+
+    `wacc` (float) and `peers` (list[PeerSnapshot]) are optional analytical
+    overlays — when supplied, the Profitability chart shows a WACC ref
+    line and the Margin chart shows a peer-median net margin ref line.
+    """
     from ui.charts.profitability_evolution import build_profitability_evolution
     from ui.charts.debt_evolution import build_debt_evolution
     from ui.charts.capital_allocation_stacked import build_capital_allocation_chart
@@ -1843,7 +1848,7 @@ def _charts_tab_fragment(inc, bal, cf):
         unsafe_allow_html=True,
     )
     st.plotly_chart(
-        build_margins_figure(inc, bal, cf, height=320),
+        build_margins_figure(inc, bal, cf, height=320, peers=peers),
         use_container_width=True, config={"displayModeBar": False},
     )
 
@@ -1853,7 +1858,7 @@ def _charts_tab_fragment(inc, bal, cf):
         unsafe_allow_html=True,
     )
     st.plotly_chart(
-        build_profitability_evolution(inc, bal, cf, height=360),
+        build_profitability_evolution(inc, bal, cf, height=360, wacc=wacc),
         use_container_width=True, config={"displayModeBar": False},
     )
 
@@ -1903,7 +1908,11 @@ def _charts_tab_fragment(inc, bal, cf):
 
 
 with tab_charts:
-    _charts_tab_fragment(inc5, bal5, cf5)
+    _charts_tab_fragment(
+        inc5, bal5, cf5,
+        wacc=(results.wacc.wacc if results.wacc else None),
+        peers=peers_demo,
+    )
 
 
 # ============================================================

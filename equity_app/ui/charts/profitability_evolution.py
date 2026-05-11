@@ -1,5 +1,6 @@
 """ROIC / ROCE / ROA evolution — three lines, consistent palette."""
 from __future__ import annotations
+from typing import Optional
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -7,7 +8,8 @@ import plotly.graph_objects as go
 from analysis.ratios import _get, roic, roa
 from ui.charts import (
     CHART_HEIGHT, COLOR_GROWTH, COLOR_NEUTRAL, COLOR_PRIMARY,
-    COLOR_TEXT_MUTED, _annotate_last, _base_layout, _empty_layout, _fy_labels,
+    COLOR_REFERENCE, COLOR_TEXT_MUTED, _annotate_last, _base_layout,
+    _empty_layout, _fy_labels,
 )
 
 
@@ -27,6 +29,7 @@ def build_profitability_evolution(
     cash: pd.DataFrame,
     *,
     height: int = CHART_HEIGHT,
+    wacc: Optional[float] = None,
 ) -> go.Figure:
     fig = go.Figure()
 
@@ -65,6 +68,18 @@ def build_profitability_evolution(
         return fig
 
     fig.update_layout(**_base_layout(height=height, y_ticksuffix="%"))
+
+    # WACC reference — dashed horizontal. Spread between ROIC and WACC
+    # is the cleanest visual for "is this company creating value?".
+    if wacc is not None and wacc > 0:
+        wacc_pct = float(wacc) * 100.0
+        fig.add_hline(
+            y=wacc_pct, line_dash="dash", line_color=COLOR_REFERENCE,
+            opacity=0.7,
+            annotation_text=f"WACC ≈ {wacc_pct:.1f}%",
+            annotation_position="bottom right",
+            annotation_font=dict(size=9, color=COLOR_TEXT_MUTED),
+        )
 
     # Anomaly note: ROIC > 50% is mathematically valid but typically
     # signals reduced book equity from buybacks (e.g. AAPL FY24/25).
